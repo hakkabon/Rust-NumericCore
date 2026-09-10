@@ -1,0 +1,19 @@
+[package]
+name = "nc-bench"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Criterion benchmarks for nc-kernels-* and, eventually, dispatch-threshold tuning data for the Swift DispatchPolicy."
+publish = false
+
+[dependencies]
+nc-kernels-generic.workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "matmul_generic"
+harness = false

@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "nc-core",
+    "nc-kernels-generic",
+    "nc-kernels-simd",
+    "nc-sparse",
+    "nc-decomp",
+    "nc-iterative",
+    "nc-optimize",
+    "nc-ffi",
+    "nc-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["hakkabon"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/hakkabon/NumericCore"
+
+[workspace.dependencies]
+nc-core = { path = "nc-core" }
+nc-kernels-generic = { path = "nc-kernels-generic" }
+nc-kernels-simd = { path = "nc-kernels-simd" }
+nc-sparse = { path = "nc-sparse" }
+nc-decomp = { path = "nc-decomp" }
+nc-iterative = { path = "nc-iterative" }
+nc-optimize = { path = "nc-optimize" }
+thiserror = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1

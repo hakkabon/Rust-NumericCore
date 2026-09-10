@@ -1,0 +1,13 @@
+[package]
+name = "nc-optimize"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Optimization solvers (LP simplex/interior-point, later MILP/NLP) consumed via the ASL-style SolverInterface. Backs the AMPL-style modeling layer (NumericCoreAMPL)."
+
+[dependencies]
+nc-core.workspace = true
+nc-sparse.workspace = true
+thiserror.workspace = true

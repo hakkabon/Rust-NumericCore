@@ -1,0 +1,12 @@
+[package]
+name = "nc-sparse"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sparse matrix formats (CSR/CSC/COO) and SpMV/SpMM. Shared by NumericCore's sparse solvers, NumericCoreGraph, and the AMPL presolve layer's constraint matrix."
+
+[dependencies]
+nc-core.workspace = true
+thiserror.workspace = true

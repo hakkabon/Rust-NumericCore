@@ -1,0 +1,12 @@
+[package]
+name = "nc-kernels-simd"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SIMD-accelerated variants of nc-kernels-generic. Scaffold — not yet implemented."
+
+[dependencies]
+nc-core.workspace = true
+nc-kernels-generic.workspace = true

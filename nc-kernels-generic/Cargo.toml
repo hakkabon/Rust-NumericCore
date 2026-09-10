@@ -1,0 +1,11 @@
+[package]
+name = "nc-kernels-generic"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust fallback numeric kernels (matmul, axpy, dot, norm). Used when Accelerate/MPS are unavailable or don't cover a dtype."
+
+[dependencies]
+nc-core.workspace = true

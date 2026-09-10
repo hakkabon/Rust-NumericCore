@@ -1,0 +1,12 @@
+[package]
+name = "nc-iterative"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Iterative solvers (CG, GMRES, BiCGStab, Lanczos) for large sparse systems. Scaffold."
+
+[dependencies]
+nc-core.workspace = true
+nc-sparse.workspace = true

@@ -1,0 +1,45 @@
+name: Build & release XCFramework
+
+# Scaffold — not yet run. Mirrors the release process Layout already
+# uses for its Rust-to-Swift FFI artifact. Triggered on a version tag
+# push (e.g. `v0.1.0`); publishes NumericCoreFFI.xcframework.zip as a
+# release asset for Swift-NumericCore's Package.swift binaryTarget to
+# point at.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build-xcframework:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust targets
+        run: |
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim \
+                             aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Build XCFramework and generate bindings
+        run: ./scripts/build-xcframework.sh
+
+      - name: Compute checksum
+        id: checksum
+        run: |
+          CHECKSUM=$(swift package compute-checksum target/xcframework/NumericCoreFFI.xcframework.zip)
+          echo "checksum=${CHECKSUM}" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/xcframework/NumericCoreFFI.xcframework.zip
+          body: |
+            Checksum for Swift-NumericCore's Package.swift binaryTarget:
+            ${{ steps.checksum.outputs.checksum }}
+
+            Generated Swift bindings (copy into
+            Swift-NumericCore/Sources/NCBindings/Generated/ if the UniFFI
+            interface changed): see build artifact at
+            target/xcframework/bindings/*.swift

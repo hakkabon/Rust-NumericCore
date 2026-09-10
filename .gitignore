@@ -1,0 +1,30 @@
+# ==========================================
+# Rust & Cargo Ignore Rules
+# ==========================================
+# Ignore the main cargo build outputs
+**/target/
+**/target-*/
+
+# Cargo locks and local config overrides
+**/*.rs.bk
+Cargo.lock
+
+# Swift
+/swift/.build/
+/swift/.swiftpm/
+*.xcodeproj
+.DS_Store
+
+# ==========================================
+# OS & Editor Overhead
+# ==========================================
+.DS_Store
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*~
+\#*
+.\#*

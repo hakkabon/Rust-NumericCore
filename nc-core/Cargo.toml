@@ -1,0 +1,15 @@
+[package]
+name = "nc-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Storage, layout, strides, and dtype bookkeeping for NumericCore. No numeric kernels live here."
+
+[dependencies]
+thiserror.workspace = true
+
+# proptest intentionally not added yet — the scaffold's example tests are
+# hand-written. Add it back (`proptest = "1"`) once real property tests
+# are written, e.g. for Layout::offset never aliasing across indices.

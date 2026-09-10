@@ -1,0 +1,12 @@
+[package]
+name = "nc-decomp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust fallback matrix decompositions (LU, QR, Cholesky, SVD, eigen). v1: wrap Accelerate/LAPACKE from Swift instead — only implement here what Accelerate doesn't cover. See docs/decisions/0003-decomposition-scope.md."
+
+[dependencies]
+nc-core.workspace = true
+thiserror.workspace = true

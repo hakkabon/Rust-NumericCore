@@ -1,0 +1,33 @@
+[package]
+name = "nc-ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Swift-facing FFI surface. Built as a staticlib/cdylib and consumed via UniFFI, matching the FFI approach already used in the Layout project."
+
+[lib]
+crate-type = ["staticlib", "cdylib", "lib"]
+
+[dependencies]
+nc-core.workspace = true
+nc-sparse.workspace = true
+nc-kernels-generic.workspace = true
+uniffi = "0.27"
+thiserror.workspace = true
+
+[features]
+# Isolated behind a feature flag rather than always-on: the "cli" feature
+# pulls in `clap`, which (as of writing) requires a newer Cargo/edition
+# than may be installed by default. Normal `cargo build`/`cargo test` for
+# the library and its normal dependents should never need this feature.
+# Enable it only when running scripts/build-xcframework.sh's bindgen step,
+# on a toolchain new enough to support it:
+#   cargo run --release --features bindgen-cli --bin uniffi-bindgen -- generate ...
+bindgen-cli = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["bindgen-cli"]
