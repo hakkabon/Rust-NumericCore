@@ -61,6 +61,17 @@ not yet wired to call through this — that rewiring is the next step,
 not done as part of proving the Rust-side surface builds and tests
 correctly.
 
+## Update (Swift side wired through, f32 added)
+`NCBindings`/`RustFallbackBackend` on the Swift side are now wired
+through (`Swift-NumericCore` side — see that repo's ADR 0005/0006
+updates). Once that rewiring made `Float`'s remaining gap concrete,
+`f32` counterparts (`matmul_f32`, `dot_f32`, `axpy_f32`, `norm2_f32`,
+`spmv_f32`) were added here — no new numerics, since
+`nc-kernels-generic`'s kernels and `nc-sparse::CsrMatrix` were already
+generic over the element type; only the FFI-boundary wrapper functions
+and `Ffi*F32` record types were new. Confirmed building and passing
+(12/12 tests in `nc-ffi`, full workspace green).
+
 ## Alternatives considered
 - **cbindgen + hand-rolled C ABI** (the original sketch). Rejected once
   the `Layout` precedent was identified — no reason to introduce a

@@ -20,13 +20,15 @@
 //! function signatures, which can stay as the "small value" convenience
 //! API even after a zero-copy path exists alongside it.
 //!
-//! ## Why `f32` isn't exposed yet
-//! `NCScalar` (Swift) covers both `Float` and `Double`, but this file
-//! only exports `f64` entry points. Add `_f32` counterparts
-//! (`matmul_f32`, etc.) using the same pattern here once
-//! `NumericCore`'s `RustFallbackBackend` is actually rewired to call
-//! through `NCBindings` (see ADR 0006) — no new design work, just more
-//! of the same shape.
+//! ## `f32` exports
+//! `matmul_f32`/`dot_f32`/`axpy_f32`/`norm2_f32`/`spmv_f32` mirror their
+//! `f64` counterparts exactly (`nc-kernels-generic`'s kernels and
+//! `nc-sparse::CsrMatrix` are already generic over the element type, so
+//! this added no new Rust-side numerics — only the FFI-boundary
+//! wrappers). Added once `NumericCore`'s `RustFallbackBackend`/
+//! `SparseMatrix` were actually rewired to call through for `Double`
+//! (ADR 0006's update) and it became clear `Float` was the one
+//! remaining gap in that retirement.
 
 use nc_kernels_generic as kernels;
 use nc_sparse::CsrMatrix;
@@ -40,19 +42,19 @@ uniffi::setup_scaffolding!();
 /// `NCError` at the call site, not re-expose this type to application code.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum FfiError {
-    #[error("dimension mismatch: {message}")]
-    DimensionMismatch { message: String },
+    #[error("dimension mismatch: {0}")]
+    DimensionMismatch(String),
 }
 
 impl From<nc_sparse::SparseError> for FfiError {
     fn from(err: nc_sparse::SparseError) -> Self {
-        FfiError::DimensionMismatch { message: err.to_string() }
+        FfiError::DimensionMismatch(err.to_string())
     }
 }
 
-/// A dense matrix crossing the FFI boundary, column-major (matching
-/// `Matrix<T>`'s Swift-side layout — ADR 0001 — so no reordering happens
-/// in either direction).
+/// A dense `f64` matrix crossing the FFI boundary, column-major
+/// (matching `Matrix<T>`'s Swift-side layout — ADR 0001 — so no
+/// reordering happens in either direction).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiMatrixF64 {
     pub rows: u32,
@@ -60,7 +62,15 @@ pub struct FfiMatrixF64 {
     pub data: Vec<f64>,
 }
 
-/// A CSR sparse matrix crossing the FFI boundary — field names and
+/// The `f32` counterpart of `FfiMatrixF64`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiMatrixF32 {
+    pub rows: u32,
+    pub cols: u32,
+    pub data: Vec<f32>,
+}
+
+/// A CSR sparse `f64` matrix crossing the FFI boundary — field names and
 /// shape mirror `nc_sparse::CsrMatrix` directly (ADR 0002).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiCsrMatrixF64 {
@@ -71,12 +81,23 @@ pub struct FfiCsrMatrixF64 {
     pub values: Vec<f64>,
 }
 
+/// The `f32` counterpart of `FfiCsrMatrixF64`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiCsrMatrixF32 {
+    pub rows: u32,
+    pub cols: u32,
+    pub row_ptr: Vec<u32>,
+    pub col_indices: Vec<u32>,
+    pub values: Vec<f32>,
+}
+
 #[uniffi::export]
 pub fn matmul_f64(a: FfiMatrixF64, b: FfiMatrixF64) -> Result<FfiMatrixF64, FfiError> {
     if a.cols != b.rows {
-        return Err(FfiError::DimensionMismatch {
-            message: format!("matmul: {}x{} * {}x{}", a.rows, a.cols, b.rows, b.cols),
-        });
+        return Err(FfiError::DimensionMismatch(format!(
+            "matmul: {}x{} * {}x{}",
+            a.rows, a.cols, b.rows, b.cols
+        )));
     }
     let (m, k, n) = (a.rows as usize, a.cols as usize, b.cols as usize);
     let mut c = vec![0.0f64; m * n];
@@ -84,12 +105,42 @@ pub fn matmul_f64(a: FfiMatrixF64, b: FfiMatrixF64) -> Result<FfiMatrixF64, FfiE
     Ok(FfiMatrixF64 { rows: a.rows, cols: b.cols, data: c })
 }
 
+/// The `f32` counterpart of `matmul_f64`.
+#[uniffi::export]
+pub fn matmul_f32(a: FfiMatrixF32, b: FfiMatrixF32) -> Result<FfiMatrixF32, FfiError> {
+    if a.cols != b.rows {
+        return Err(FfiError::DimensionMismatch(format!(
+            "matmul: {}x{} * {}x{}",
+            a.rows, a.cols, b.rows, b.cols
+        )));
+    }
+    let (m, k, n) = (a.rows as usize, a.cols as usize, b.cols as usize);
+    let mut c = vec![0.0f32; m * n];
+    kernels::matmul(&a.data, &b.data, &mut c, m, k, n);
+    Ok(FfiMatrixF32 { rows: a.rows, cols: b.cols, data: c })
+}
+
 #[uniffi::export]
 pub fn dot_f64(x: Vec<f64>, y: Vec<f64>) -> Result<f64, FfiError> {
     if x.len() != y.len() {
-        return Err(FfiError::DimensionMismatch {
-            message: format!("dot: lengths {} and {}", x.len(), y.len()),
-        });
+        return Err(FfiError::DimensionMismatch(format!(
+            "dot: lengths {} and {}",
+            x.len(),
+            y.len()
+        )));
+    }
+    Ok(kernels::dot(&x, &y))
+}
+
+/// The `f32` counterpart of `dot_f64`.
+#[uniffi::export]
+pub fn dot_f32(x: Vec<f32>, y: Vec<f32>) -> Result<f32, FfiError> {
+    if x.len() != y.len() {
+        return Err(FfiError::DimensionMismatch(format!(
+            "dot: lengths {} and {}",
+            x.len(),
+            y.len()
+        )));
     }
     Ok(kernels::dot(&x, &y))
 }
@@ -101,9 +152,26 @@ pub fn dot_f64(x: Vec<f64>, y: Vec<f64>) -> Result<f64, FfiError> {
 #[uniffi::export]
 pub fn axpy_f64(alpha: f64, x: Vec<f64>, y: Vec<f64>) -> Result<Vec<f64>, FfiError> {
     if x.len() != y.len() {
-        return Err(FfiError::DimensionMismatch {
-            message: format!("axpy: lengths {} and {}", x.len(), y.len()),
-        });
+        return Err(FfiError::DimensionMismatch(format!(
+            "axpy: lengths {} and {}",
+            x.len(),
+            y.len()
+        )));
+    }
+    let mut result = y;
+    kernels::axpy(alpha, &x, &mut result);
+    Ok(result)
+}
+
+/// The `f32` counterpart of `axpy_f64`.
+#[uniffi::export]
+pub fn axpy_f32(alpha: f32, x: Vec<f32>, y: Vec<f32>) -> Result<Vec<f32>, FfiError> {
+    if x.len() != y.len() {
+        return Err(FfiError::DimensionMismatch(format!(
+            "axpy: lengths {} and {}",
+            x.len(),
+            y.len()
+        )));
     }
     let mut result = y;
     kernels::axpy(alpha, &x, &mut result);
@@ -115,8 +183,27 @@ pub fn norm2_f64(x: Vec<f64>) -> f64 {
     kernels::norm2(&x)
 }
 
+/// The `f32` counterpart of `norm2_f64`.
+#[uniffi::export]
+pub fn norm2_f32(x: Vec<f32>) -> f32 {
+    kernels::norm2(&x)
+}
+
 #[uniffi::export]
 pub fn spmv_f64(matrix: FfiCsrMatrixF64, x: Vec<f64>) -> Result<Vec<f64>, FfiError> {
+    let csr = CsrMatrix::new(
+        matrix.rows as usize,
+        matrix.cols as usize,
+        matrix.row_ptr.iter().map(|&v| v as usize).collect(),
+        matrix.col_indices.iter().map(|&v| v as usize).collect(),
+        matrix.values,
+    )?;
+    Ok(csr.spmv(&x)?)
+}
+
+/// The `f32` counterpart of `spmv_f64`.
+#[uniffi::export]
+pub fn spmv_f32(matrix: FfiCsrMatrixF32, x: Vec<f32>) -> Result<Vec<f32>, FfiError> {
     let csr = CsrMatrix::new(
         matrix.rows as usize,
         matrix.cols as usize,
@@ -173,6 +260,50 @@ mod tests {
             values: vec![1.0, 2.0, 3.0],
         };
         let result = spmv_f64(matrix, vec![1.0, 1.0, 1.0]).unwrap();
+        assert_eq!(result, vec![3.0, 3.0]);
+    }
+
+    #[test]
+    fn matmul_f32_identity() {
+        let identity = FfiMatrixF32 { rows: 2, cols: 2, data: vec![1.0, 0.0, 0.0, 1.0] };
+        let a = FfiMatrixF32 { rows: 2, cols: 2, data: vec![1.0, 2.0, 3.0, 4.0] };
+        let result = matmul_f32(identity, a.clone()).unwrap();
+        assert_eq!(result.data, a.data);
+    }
+
+    #[test]
+    fn matmul_f32_rejects_dimension_mismatch() {
+        let a = FfiMatrixF32 { rows: 2, cols: 3, data: vec![0.0; 6] };
+        let b = FfiMatrixF32 { rows: 2, cols: 2, data: vec![0.0; 4] };
+        assert!(matmul_f32(a, b).is_err());
+    }
+
+    #[test]
+    fn dot_f32_matches_hand_computation() {
+        assert_eq!(dot_f32(vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]).unwrap(), 32.0);
+    }
+
+    #[test]
+    fn axpy_f32_updates_correctly() {
+        let result = axpy_f32(2.0, vec![1.0, 1.0, 1.0], vec![1.0, 2.0, 3.0]).unwrap();
+        assert_eq!(result, vec![3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn norm2_f32_matches_hand_computation() {
+        assert_eq!(norm2_f32(vec![3.0, 4.0]), 5.0);
+    }
+
+    #[test]
+    fn spmv_f32_matches_hand_computation() {
+        let matrix = FfiCsrMatrixF32 {
+            rows: 2,
+            cols: 3,
+            row_ptr: vec![0, 2, 3],
+            col_indices: vec![0, 2, 1],
+            values: vec![1.0, 2.0, 3.0],
+        };
+        let result = spmv_f32(matrix, vec![1.0, 1.0, 1.0]).unwrap();
         assert_eq!(result, vec![3.0, 3.0]);
     }
 }
