@@ -40,13 +40,13 @@ uniffi::setup_scaffolding!();
 /// `NCError` at the call site, not re-expose this type to application code.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum FfiError {
-    #[error("dimension mismatch: {0}")]
-    DimensionMismatch(String),
+    #[error("dimension mismatch: {message}")]
+    DimensionMismatch { message: String },
 }
 
 impl From<nc_sparse::SparseError> for FfiError {
     fn from(err: nc_sparse::SparseError) -> Self {
-        FfiError::DimensionMismatch(err.to_string())
+        FfiError::DimensionMismatch { message: err.to_string() }
     }
 }
 
@@ -74,10 +74,9 @@ pub struct FfiCsrMatrixF64 {
 #[uniffi::export]
 pub fn matmul_f64(a: FfiMatrixF64, b: FfiMatrixF64) -> Result<FfiMatrixF64, FfiError> {
     if a.cols != b.rows {
-        return Err(FfiError::DimensionMismatch(format!(
-            "matmul: {}x{} * {}x{}",
-            a.rows, a.cols, b.rows, b.cols
-        )));
+        return Err(FfiError::DimensionMismatch {
+            message: format!("matmul: {}x{} * {}x{}", a.rows, a.cols, b.rows, b.cols),
+        });
     }
     let (m, k, n) = (a.rows as usize, a.cols as usize, b.cols as usize);
     let mut c = vec![0.0f64; m * n];
@@ -88,11 +87,9 @@ pub fn matmul_f64(a: FfiMatrixF64, b: FfiMatrixF64) -> Result<FfiMatrixF64, FfiE
 #[uniffi::export]
 pub fn dot_f64(x: Vec<f64>, y: Vec<f64>) -> Result<f64, FfiError> {
     if x.len() != y.len() {
-        return Err(FfiError::DimensionMismatch(format!(
-            "dot: lengths {} and {}",
-            x.len(),
-            y.len()
-        )));
+        return Err(FfiError::DimensionMismatch {
+            message: format!("dot: lengths {} and {}", x.len(), y.len()),
+        });
     }
     Ok(kernels::dot(&x, &y))
 }
@@ -104,11 +101,9 @@ pub fn dot_f64(x: Vec<f64>, y: Vec<f64>) -> Result<f64, FfiError> {
 #[uniffi::export]
 pub fn axpy_f64(alpha: f64, x: Vec<f64>, y: Vec<f64>) -> Result<Vec<f64>, FfiError> {
     if x.len() != y.len() {
-        return Err(FfiError::DimensionMismatch(format!(
-            "axpy: lengths {} and {}",
-            x.len(),
-            y.len()
-        )));
+        return Err(FfiError::DimensionMismatch {
+            message: format!("axpy: lengths {} and {}", x.len(), y.len()),
+        });
     }
     let mut result = y;
     kernels::axpy(alpha, &x, &mut result);

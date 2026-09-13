@@ -1,15 +1,26 @@
 name: Build & release XCFramework
 
-# Scaffold — not yet run. Mirrors the release process Layout already
-# uses for its Rust-to-Swift FFI artifact. Triggered on a version tag
-# push (e.g. `v0.1.0`); publishes NumericCoreFFI.xcframework.zip as a
-# release asset for Swift-NumericCore's Package.swift binaryTarget to
-# point at.
+# Mirrors the release process Layout already uses for its Rust-to-Swift
+# FFI artifact. Triggered on a version tag push (e.g. `v0.1.0`):
+# builds NumericCoreFFI.xcframework + the UniFFI Swift bindings,
+# publishes both as release assets, and notifies Swift-NumericCore so
+# its `update-ffi` workflow can vendor the new framework automatically.
+#
+# Swift-NumericCore consumes this release in two ways (see its
+# docs/decisions/0009-local-binary-target-for-ffi.md):
+#   1. today: vendored copy under Frameworks/ + Generated/, refreshed by
+#      its `update-ffi` workflow (triggered below via repository_dispatch
+#      and, as a fallback, by its own schedule polling `latest`);
+#   2. later: remote binaryTarget URL + checksum (both printed into this
+#      release's body by the `checksum` step).
 
 on:
   push:
     tags:
       - "v*.*.*"
+
+permissions:
+  contents: write
 
 jobs:
   build-xcframework:
@@ -22,8 +33,20 @@ jobs:
           rustup target add aarch64-apple-ios aarch64-apple-ios-sim \
                              aarch64-apple-darwin x86_64-apple-darwin
 
+      - name: Run Rust tests
+        run: cargo test --workspace
+
       - name: Build XCFramework and generate bindings
         run: ./scripts/build-xcframework.sh
+
+      - name: Verify Headers layout (module.modulemap guard)
+        run: |
+          for slice in target/xcframework/NumericCoreFFI.xcframework/*/; do
+            test -f "${slice}/Headers/module.modulemap" || { echo "missing ${slice}/Headers/module.modulemap" >&2; exit 1; }
+          done
+          if ls target/xcframework/NumericCoreFFI.xcframework/*/Headers/*.swift >/dev/null 2>&1; then
+            echo "stray *.swift inside XCFramework Headers/" >&2; exit 1
+          fi
 
       - name: Compute checksum
         id: checksum
@@ -34,12 +57,47 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/xcframework/NumericCoreFFI.xcframework.zip
+          files: |
+            target/xcframework/NumericCoreFFI.xcframework.zip
+            target/xcframework/bindings/nc_ffi.swift
           body: |
-            Checksum for Swift-NumericCore's Package.swift binaryTarget:
-            ${{ steps.checksum.outputs.checksum }}
+            NumericCoreFFI XCFramework + UniFFI Swift bindings for ${{ github.ref_name }}.
 
-            Generated Swift bindings (copy into
-            Swift-NumericCore/Sources/NCBindings/Generated/ if the UniFFI
-            interface changed): see build artifact at
-            target/xcframework/bindings/*.swift
+            ## Swift-NumericCore: remote binaryTarget (when ADR 0009 flips)
+            ```swift
+            .binaryTarget(
+                name: "NumericCoreFFI",
+                url: "https://github.com/hakkabon/Rust-NumericCore/releases/download/${{ github.ref_name }}/NumericCoreFFI.xcframework.zip",
+                checksum: "${{ steps.checksum.outputs.checksum }}"
+            ),
+            ```
+
+            ## Swift-NumericCore: vendored update (current, ADR 0009)
+            The `update-ffi` workflow in Swift-NumericCore picks this tag up
+            automatically. Manual equivalent:
+              1. download `NumericCoreFFI.xcframework.zip` and `nc_ffi.swift`
+                 from this release,
+              2. unzip the framework over `Frameworks/NumericCoreFFI.xcframework`
+                 (it must contain `Headers/module.modulemap` in every slice —
+                 without it `canImport(nc_ffiFFI)` fails and the link breaks
+                 with undefined `uniffi_*`/`ffi_*` symbols),
+              3. copy `nc_ffi.swift` into `Sources/NCBindings/Generated/`,
+              4. run `swift build` + `swift test`.
+
+      - name: Notify Swift-NumericCore
+        # Best-effort: requires a PAT with repo scope stored as
+        # SWIFT_NUMERICCORE_DISPATCH_TOKEN (the default GITHUB_TOKEN
+        # cannot dispatch across repos). If unset, Swift-NumericCore's
+        # own scheduled poll picks the release up instead — nothing fails.
+        env:
+          TOKEN: ${{ secrets.SWIFT_NUMERICCORE_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "${TOKEN}" ]; then
+            echo "No dispatch token configured; Swift-NumericCore will pick up ${{ github.ref_name }} via its scheduled poll."
+            exit 0
+          fi
+          curl -sS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            https://api.github.com/repos/hakkabon/Swift-NumericCore/dispatches \
+            -d '{"event_type":"rust-release","client_payload":{"tag":"${{ github.ref_name }}"}}'
