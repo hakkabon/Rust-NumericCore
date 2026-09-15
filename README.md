@@ -28,7 +28,7 @@ Rust-NumericCore/
 ├── nc-decomp/            # LU/QR/SVD/eigen (scaffold — Accelerate covers this on the Swift side)
 ├── nc-iterative/         # Conjugate Gradient implemented; GMRES/BiCGStab/Lanczos not yet
 ├── nc-optimize/          # LP/MILP/NLP Problem/Solver interface — the AMPL back end; StubSolver only
-├── nc-ffi/               # UniFFI surface — matmul/dot/axpy/norm2/spmv, f64 and f32, implemented
+├── nc-ffi/               # UniFFI surface — matmul/dot/axpy/norm2/spmv (f64+f32), plus opt-in FfiVectorF64/F32 zero-copy buffers
 ├── nc-bench/             # Criterion benchmarks (needs a newer cargo than 1.75 for its deps)
 ├── scripts/
 │   └── build-xcframework.sh   # builds the XCFramework + Swift bindings for release

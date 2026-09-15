@@ -72,6 +72,21 @@ generic over the element type; only the FFI-boundary wrapper functions
 and `Ffi*F32` record types were new. Confirmed building and passing
 (12/12 tests in `nc-ffi`, full workspace green).
 
+## Update (zero-copy vector buffers)
+`FfiVectorF64`/`FfiVectorF32` — `uniffi::Object`s (`Arc`-wrapped,
+`Mutex`-guarded `Vec`) with `axpyInPlace`/`dot`/`norm2` methods that
+never copy data across the FFI boundary between construction and the
+final `toVec()`/`toArray()` read-back. Addresses the copy-per-call cost
+this file's module docs (and ADR 0006) flagged from the start, but as
+**additive, opt-in infrastructure** — the existing `matmul_f64`-style
+functions and `NumericCore`'s default `Matrix`/`Vector` storage are
+unchanged. Nothing currently calls this from the Swift side by default;
+it's there for a future hot-loop consumer (an iterative solver, or a
+`Swift-DataLens` inner loop) to opt into once profiling shows a concrete
+need, per this project's "don't build ahead of need" principle.
+22/22 tests pass in `nc-ffi` including a chained-axpy cross-check
+against the plain kernel function.
+
 ## Alternatives considered
 - **cbindgen + hand-rolled C ABI** (the original sketch). Rejected once
   the `Layout` precedent was identified — no reason to introduce a
