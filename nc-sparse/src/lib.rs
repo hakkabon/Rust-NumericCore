@@ -77,6 +77,26 @@ impl<T: Copy + Default + std::ops::Add<Output = T> + std::ops::Mul<Output = T>> 
         self.values.len()
     }
 
+    /// Iterate `(row, col, value)` triples in row-major order. Added for
+    /// consumers that need to expand a sparse matrix into a different
+    /// representation — the first is `nc-optimize`'s dense revised
+    /// simplex workspace (see that crate's `simplex` module), which
+    /// works with a dense constraint matrix given this project's
+    /// "smallish problems" scope for the simplex path (ADR — ties to
+    /// the Rust-side sequencing discussion, not yet a numbered ADR in
+    /// this repo since it's Swift-NumericCore's ADR set that tracks
+    /// these).
+    pub fn iter_entries(&self) -> impl Iterator<Item = (usize, usize, T)> + '_
+    where
+        T: Copy,
+    {
+        (0..self.rows).flat_map(move |row| {
+            let start = self.row_ptr[row];
+            let end = self.row_ptr[row + 1];
+            (start..end).map(move |idx| (row, self.col_indices[idx], self.values[idx]))
+        })
+    }
+
     /// Sparse matrix-vector product: `y = A * x`.
     pub fn spmv(&self, x: &[T]) -> Result<Vec<T>, SparseError> {
         if x.len() != self.cols {
@@ -126,5 +146,12 @@ mod tests {
     fn spmv_rejects_dimension_mismatch() {
         let m = sample();
         assert!(m.spmv(&[1.0, 1.0]).is_err());
+    }
+
+    #[test]
+    fn iter_entries_visits_every_nonzero_in_row_major_order() {
+        let m = sample(); // [[1, 0, 2], [0, 3, 0]]
+        let entries: Vec<_> = m.iter_entries().collect();
+        assert_eq!(entries, vec![(0, 0, 1.0), (0, 2, 2.0), (1, 1, 3.0)]);
     }
 }

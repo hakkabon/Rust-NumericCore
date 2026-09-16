@@ -17,6 +17,9 @@
 use nc_sparse::CsrMatrix;
 use thiserror::Error;
 
+pub mod simplex;
+pub use simplex::RevisedSimplexSolver;
+
 /// Bound on a variable or constraint. `None` means unbounded in that
 /// direction (`-inf` / `+inf`).
 #[derive(Debug, Clone, Copy)]
