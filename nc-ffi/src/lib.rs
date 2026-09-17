@@ -75,11 +75,28 @@ pub enum FfiError {
     // read/write, with an identical wire encoding.
     #[error("dimension mismatch: {message}")]
     DimensionMismatch { message: String },
+
+    /// Carries any `nc_optimize::OptimizeError` (a solver reporting
+    /// "not implemented" for a problem shape it doesn't handle, or a
+    /// numerical failure like a non-positive-definite normal-equations
+    /// matrix in `InteriorPointSolver`). Kept as a separate variant
+    /// from `DimensionMismatch` rather than folding solver errors into
+    /// that one — they're a different failure category, not a
+    /// dimension problem, and a caller may reasonably want to tell them
+    /// apart.
+    #[error("solver error: {message}")]
+    SolverError { message: String },
 }
 
 impl From<nc_sparse::SparseError> for FfiError {
     fn from(err: nc_sparse::SparseError) -> Self {
         FfiError::DimensionMismatch { message: err.to_string() }
+    }
+}
+
+impl From<nc_optimize::OptimizeError> for FfiError {
+    fn from(err: nc_optimize::OptimizeError) -> Self {
+        FfiError::SolverError { message: err.to_string() }
     }
 }
 
@@ -233,6 +250,117 @@ pub fn spmv_f32(matrix: FfiCsrMatrixF32, x: Vec<f32>) -> Result<Vec<f32>, FfiErr
         matrix.values,
     )?;
     Ok(csr.spmv(&x)?)
+}
+
+// ---------------------------------------------------------------------
+// LP solving — closes the loop from NumericCoreAMPL's CompiledProblem
+// through to nc-optimize::{RevisedSimplexSolver, InteriorPointSolver}.
+//
+// `FfiBound`/`FfiProblem`/`FfiSolution`/`FfiSolveStatus` mirror
+// `nc_optimize`'s `Bound`/`Problem`/`Solution`/`SolveStatus` field for
+// field — this file's job is only the boundary crossing, not any new
+// logic. `solve_lp_simplex`/`solve_lp_interior_point` are separate
+// exported functions rather than one function taking a solver-choice
+// enum, matching the explicit (not policy-based) solver selection
+// decision from `nc-optimize`'s ADR 0004 update — the choice is made in
+// Swift by which function it calls, not by a parameter this file has
+// to validate.
+// ---------------------------------------------------------------------
+
+/// Mirrors `nc_optimize::Bound`. `None` means unbounded in that
+/// direction, same convention as the Rust type.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiBound {
+    pub lower: Option<f64>,
+    pub upper: Option<f64>,
+}
+
+/// Mirrors `nc_optimize::Problem`, with the constraint matrix crossing
+/// as `FfiCsrMatrixF64` (already established above) rather than a
+/// separate ad hoc shape.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiProblem {
+    pub objective: Vec<f64>,
+    pub constraints: FfiCsrMatrixF64,
+    pub row_bounds: Vec<FfiBound>,
+    pub var_bounds: Vec<FfiBound>,
+}
+
+/// Mirrors `nc_optimize::SolveStatus`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiSolveStatus {
+    Optimal,
+    Infeasible,
+    Unbounded,
+    IterationLimit,
+}
+
+/// Mirrors `nc_optimize::Solution`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiSolution {
+    pub variable_values: Vec<f64>,
+    pub objective_value: f64,
+    pub status: FfiSolveStatus,
+}
+
+fn to_domain_problem(problem: FfiProblem) -> Result<nc_optimize::Problem, FfiError> {
+    let constraints = CsrMatrix::new(
+        problem.constraints.rows as usize,
+        problem.constraints.cols as usize,
+        problem.constraints.row_ptr.iter().map(|&v| v as usize).collect(),
+        problem.constraints.col_indices.iter().map(|&v| v as usize).collect(),
+        problem.constraints.values,
+    )?;
+    Ok(nc_optimize::Problem {
+        objective: problem.objective,
+        constraints,
+        row_bounds: problem.row_bounds.into_iter().map(to_domain_bound).collect(),
+        var_bounds: problem.var_bounds.into_iter().map(to_domain_bound).collect(),
+    })
+}
+
+fn to_domain_bound(bound: FfiBound) -> nc_optimize::Bound {
+    nc_optimize::Bound { lower: bound.lower, upper: bound.upper }
+}
+
+fn from_domain_solution(solution: nc_optimize::Solution) -> FfiSolution {
+    FfiSolution {
+        variable_values: solution.variable_values,
+        objective_value: solution.objective_value,
+        status: match solution.status {
+            nc_optimize::SolveStatus::Optimal => FfiSolveStatus::Optimal,
+            nc_optimize::SolveStatus::Infeasible => FfiSolveStatus::Infeasible,
+            nc_optimize::SolveStatus::Unbounded => FfiSolveStatus::Unbounded,
+            nc_optimize::SolveStatus::IterationLimit => FfiSolveStatus::IterationLimit,
+        },
+    }
+}
+
+/// Solves `problem` via `nc_optimize::RevisedSimplexSolver` (default
+/// configuration). Prefer this over `solve_lp_interior_point` when
+/// exact/rigorous infeasibility or unboundedness detection matters, or
+/// the problem has equality constraints or fixed variables — see
+/// `nc_optimize::interior_point`'s module docs for why the
+/// interior-point path rejects those.
+#[uniffi::export]
+pub fn solve_lp_simplex(problem: FfiProblem) -> Result<FfiSolution, FfiError> {
+    use nc_optimize::Solver;
+    let domain_problem = to_domain_problem(problem)?;
+    let solution = nc_optimize::RevisedSimplexSolver::default().solve(&domain_problem)?;
+    Ok(from_domain_solution(solution))
+}
+
+/// Solves `problem` via `nc_optimize::InteriorPointSolver` (default
+/// configuration). See that solver's module docs for its two scope
+/// boundaries: it rejects equality constraints/fixed variables outright
+/// (surfaced here as `FfiError::SolverError`, not a crash or silent
+/// wrong answer), and its unboundedness detection is heuristic.
+#[uniffi::export]
+pub fn solve_lp_interior_point(problem: FfiProblem) -> Result<FfiSolution, FfiError> {
+    use nc_optimize::Solver;
+    let domain_problem = to_domain_problem(problem)?;
+    let solution = nc_optimize::InteriorPointSolver::default().solve(&domain_problem)?;
+    Ok(from_domain_solution(solution))
 }
 
 /// A reference-counted `f64` vector buffer living entirely in Rust —
@@ -435,6 +563,118 @@ mod tests {
         };
         let result = spmv_f32(matrix, vec![1.0, 1.0, 1.0]).unwrap();
         assert_eq!(result, vec![3.0, 3.0]);
+    }
+
+    fn ampl_example_ffi_problem() -> FfiProblem {
+        // Same problem as nc-optimize's own solver tests: maximize
+        // 3x+2y (given here pre-negated to minimize -3x-2y) s.t.
+        // x+y<=4, x<=3, x in [0,inf), y in [0,10]. Known optimum:
+        // (3, 1), objective -11.
+        FfiProblem {
+            objective: vec![-3.0, -2.0],
+            constraints: FfiCsrMatrixF64 {
+                rows: 2,
+                cols: 2,
+                row_ptr: vec![0, 2, 3],
+                col_indices: vec![0, 1, 0],
+                values: vec![1.0, 1.0, 1.0],
+            },
+            row_bounds: vec![
+                FfiBound { lower: None, upper: Some(4.0) },
+                FfiBound { lower: None, upper: Some(3.0) },
+            ],
+            var_bounds: vec![
+                FfiBound { lower: Some(0.0), upper: None },
+                FfiBound { lower: Some(0.0), upper: Some(10.0) },
+            ],
+        }
+    }
+
+    #[test]
+    fn solve_lp_simplex_matches_the_known_optimum() {
+        let solution = solve_lp_simplex(ampl_example_ffi_problem()).unwrap();
+        assert_eq!(solution.status, FfiSolveStatus::Optimal);
+        assert!((solution.variable_values[0] - 3.0).abs() < 1e-6);
+        assert!((solution.variable_values[1] - 1.0).abs() < 1e-6);
+        assert!((solution.objective_value - (-11.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn solve_lp_interior_point_matches_the_known_optimum() {
+        let solution = solve_lp_interior_point(ampl_example_ffi_problem()).unwrap();
+        assert_eq!(solution.status, FfiSolveStatus::Optimal);
+        assert!((solution.variable_values[0] - 3.0).abs() < 1e-3);
+        assert!((solution.variable_values[1] - 1.0).abs() < 1e-3);
+        assert!((solution.objective_value - (-11.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn solve_lp_simplex_and_interior_point_agree() {
+        let problem = ampl_example_ffi_problem();
+        let simplex = solve_lp_simplex(problem.clone()).unwrap();
+        let interior = solve_lp_interior_point(problem).unwrap();
+        assert!((simplex.objective_value - interior.objective_value).abs() < 1e-3);
+    }
+
+    #[test]
+    fn solve_lp_detects_infeasibility() {
+        // x <= 1 and x >= 2 can't both hold.
+        let problem = FfiProblem {
+            objective: vec![1.0],
+            constraints: FfiCsrMatrixF64 {
+                rows: 2,
+                cols: 1,
+                row_ptr: vec![0, 1, 2],
+                col_indices: vec![0, 0],
+                values: vec![1.0, 1.0],
+            },
+            row_bounds: vec![
+                FfiBound { lower: None, upper: Some(1.0) },
+                FfiBound { lower: Some(2.0), upper: None },
+            ],
+            var_bounds: vec![FfiBound { lower: Some(0.0), upper: None }],
+        };
+        let solution = solve_lp_simplex(problem).unwrap();
+        assert_eq!(solution.status, FfiSolveStatus::Infeasible);
+    }
+
+    #[test]
+    fn solve_lp_interior_point_surfaces_equality_constraint_rejection_as_solver_error() {
+        // Interior point rejects equality rows (zero-width bound) —
+        // confirms this crosses the FFI boundary as FfiError::SolverError,
+        // not a panic or a silently wrong answer.
+        let problem = FfiProblem {
+            objective: vec![1.0],
+            constraints: FfiCsrMatrixF64 {
+                rows: 1,
+                cols: 1,
+                row_ptr: vec![0, 1],
+                col_indices: vec![0],
+                values: vec![1.0],
+            },
+            row_bounds: vec![FfiBound { lower: Some(5.0), upper: Some(5.0) }],
+            var_bounds: vec![FfiBound { lower: Some(0.0), upper: Some(10.0) }],
+        };
+        let result = solve_lp_interior_point(problem);
+        assert!(matches!(result, Err(FfiError::SolverError { .. })));
+    }
+
+    #[test]
+    fn solve_lp_rejects_malformed_csr() {
+        let problem = FfiProblem {
+            objective: vec![1.0],
+            constraints: FfiCsrMatrixF64 {
+                rows: 1,
+                cols: 1,
+                row_ptr: vec![0, 1],
+                col_indices: vec![5], // out of bounds for 1 column
+                values: vec![1.0],
+            },
+            row_bounds: vec![FfiBound { lower: None, upper: Some(1.0) }],
+            var_bounds: vec![FfiBound { lower: Some(0.0), upper: None }],
+        };
+        let result = solve_lp_simplex(problem);
+        assert!(matches!(result, Err(FfiError::DimensionMismatch { .. })));
     }
 
     #[test]

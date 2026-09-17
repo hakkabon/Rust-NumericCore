@@ -87,6 +87,27 @@ need, per this project's "don't build ahead of need" principle.
 22/22 tests pass in `nc-ffi` including a chained-axpy cross-check
 against the plain kernel function.
 
+## Update (LP solving wired through)
+`solve_lp_simplex`/`solve_lp_interior_point` expose
+`nc-optimize::{RevisedSimplexSolver, InteriorPointSolver}` — closing the
+loop from `NumericCoreAMPL`'s `CompiledProblem` (Swift side) through to
+an actual solved LP. `FfiProblem`/`FfiBound`/`FfiSolution`/
+`FfiSolveStatus` mirror `nc_optimize`'s `Problem`/`Bound`/`Solution`/
+`SolveStatus` field-for-field; the constraint matrix reuses the
+already-established `FfiCsrMatrixF64`. Two solvers are exposed as two
+separate functions, not one function plus a solver-choice parameter —
+matches the explicit (not policy-based) solver selection decision from
+`nc-optimize`'s own ADR 0004 update.
+
+`FfiError` gained a second variant, `SolverError { message: String }`,
+carrying any `nc_optimize::OptimizeError` (kept distinct from
+`DimensionMismatch` — a solver rejecting a problem shape, e.g.
+`InteriorPointSolver` on an equality-constrained row, isn't a dimension
+problem). 28/28 tests pass in `nc-ffi`, including both solvers agreeing
+on the AMPL grammar doc's own example, infeasibility detection crossing
+the boundary correctly, and `InteriorPointSolver`'s equality-constraint
+rejection surfacing as `SolverError` rather than a panic.
+
 ## Alternatives considered
 - **cbindgen + hand-rolled C ABI** (the original sketch). Rejected once
   the `Layout` precedent was identified — no reason to introduce a
