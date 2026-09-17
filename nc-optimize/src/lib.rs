@@ -20,6 +20,9 @@ use thiserror::Error;
 pub mod simplex;
 pub use simplex::RevisedSimplexSolver;
 
+pub mod interior_point;
+pub use interior_point::InteriorPointSolver;
+
 /// Bound on a variable or constraint. `None` means unbounded in that
 /// direction (`-inf` / `+inf`).
 #[derive(Debug, Clone, Copy)]

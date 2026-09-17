@@ -83,3 +83,34 @@ a Rust-native Cholesky, since primal-dual path-following's Newton
 system reduces to a symmetric positive-definite normal-equations solve
 each iteration — a nice, unplanned callback to the SPD work that
 happened earlier for `Swift-DataLens`'s benefit.
+
+## Update (interior-point implemented)
+`nc-optimize::interior_point::InteriorPointSolver` — a primal-dual
+path-following method, implemented and tested (17/17 tests passing in
+`nc-optimize`, full workspace green). The SPD prediction above was
+correct: eliminating the barrier method's per-iteration Newton system
+down to `(A D⁻¹ Aᵀ) dy = rhs` gives a genuinely SPD system, solved via
+`nc_decomp::cholesky_solve` — a small, dense, pure-Rust Cholesky added
+to `nc-decomp` (previously an empty scaffold) specifically for this,
+since `nc-optimize` has no Accelerate available the way the Swift side
+does.
+
+Two real scope boundaries this solver has that `RevisedSimplexSolver`
+doesn't, both documented in `interior_point.rs`'s module docs rather
+than silently handled: it **rejects equality constraints and fixed
+variables** (a barrier method has no interior to work in across a
+zero-width bound — real barrier-method implementations handle this via
+a separate presolve/elimination step this solver doesn't have yet, not
+inside the barrier iteration), and its unboundedness detection is
+**heuristic, not certificate-based** (a proper answer needs a
+self-dual embedding; this solver instead substitutes a large finite
+bound for a missing one and flags a final solution that ends up
+suspiciously close to that substitute).
+
+**Correctness confidence for this one is higher than usual**: two of
+the test cases solve the exact same problems already hand-verified for
+`RevisedSimplexSolver` (the AMPL grammar doc's own example, and a
+3-variable greedy-knapsack-style LP) and check that interior-point's
+independently-derived iteration converges to the same optimum simplex
+found by an entirely different method — a real cross-validation, not
+just two solvers separately trusting their own hand-computed answers.

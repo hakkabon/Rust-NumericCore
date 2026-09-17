@@ -10,4 +10,5 @@ description = "Optimization solvers (LP simplex/interior-point, later MILP/NLP) 
 [dependencies]
 nc-core.workspace = true
 nc-sparse.workspace = true
+nc-decomp.workspace = true
 thiserror.workspace = true
