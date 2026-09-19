@@ -31,7 +31,9 @@ Rust-NumericCore/
 ├── nc-ffi/               # UniFFI surface — matmul/dot/axpy/norm2/spmv (f64+f32), opt-in FfiVectorF64/F32 zero-copy buffers, solve_lp_simplex/solve_lp_interior_point
 ├── nc-bench/             # Criterion benchmarks (needs a newer cargo than 1.75 for its deps)
 ├── scripts/
-│   └── build-xcframework.sh   # builds the XCFramework + Swift bindings for release
+│   └── build-xcframework.sh   # builds the XCFramework + Swift bindings; used locally and by release.yml
+├── .github/workflows/
+│   └── release.yml            # on a v*.*.* tag: build, test, publish, dispatch to Swift-NumericCore (ADR 0010)
 └── docs/decisions/       # ADRs specific to the Rust side
 ```
 
@@ -45,19 +47,45 @@ cargo test --workspace --exclude nc-bench
 was last verified against (1.75) due to its dependency tree; run it
 separately once you have a current toolchain: `cargo bench -p nc-bench`.
 
-## Releasing an XCFramework for Swift-NumericCore
+## Releasing — automated
+
+Pushing a version tag is the whole release process:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+`.github/workflows/release.yml` takes it from there: builds the
+XCFramework + UniFFI Swift bindings via `scripts/build-xcframework.sh`,
+runs the full Rust test suite, verifies every framework slice has a
+`Headers/module.modulemap` (see `build-xcframework.sh`'s comments for
+why this specific file matters — its absence causes a silent
+`canImport` failure and an undefined-symbols link error on the Swift
+side, not a build-time error here), computes the SPM binary-target
+checksum, publishes the framework and bindings as release assets, and
+notifies `Swift-NumericCore` (via a `repository_dispatch`, authenticated
+with the `SWIFT_NUMERICCORE_DISPATCH_TOKEN` repo secret) so its own
+`update-ffi.yml` can open a PR pinning `Package.swift` to the new
+release. See ADR 0010 for the full pipeline, including what happens if
+the dispatch token is missing or expired (degrades gracefully, not a
+hard failure).
+
+**No release has been tagged yet as of this writing** — the pipeline
+above is fully wired (both workflows exist, both are individually
+sound) but has never fired end-to-end as a complete system. `v0.1.0`
+will be its first real run; watch both repos' Actions tabs when you
+tag it, since a first real run is exactly when an untested interaction
+between two otherwise-correct pieces tends to surface.
+
+To build the XCFramework locally without tagging a release (e.g. to
+test a change before pushing):
 
 ```bash
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim \
                    aarch64-apple-darwin x86_64-apple-darwin
 ./scripts/build-xcframework.sh
 ```
-
-This is a **scaffold** — it has not been run end-to-end (no macOS host
-was available while writing it). Treat it as a documented starting
-point, not a verified working release process; debug it against a real
-build before wiring `.github/workflows/release.yml` to run
-automatically on tag push.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's
