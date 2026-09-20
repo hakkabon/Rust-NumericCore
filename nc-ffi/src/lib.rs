@@ -1,12 +1,12 @@
 //! Swift-facing FFI surface, via UniFFI (ADR 0005).
 //!
-//! This is intentionally a **small, proven slice**, not the full API:
-//! `nc-kernels-generic`'s matmul/dot/axpy/norm2, and `nc-sparse`'s CSR
-//! SpMV. The goal right now is to prove the whole round trip — Rust
-//! function, UniFFI-generated Swift bindings, a Swift call site, a
-//! result back — works end to end, before more of the surface (buffers
-//! shared by reference rather than copied, `nc-optimize::Solver`, etc.)
-//! is built on top of a pattern that hasn't been proven yet.
+//! This intentionally exposes a **small, proven numerical slice**:
+//! `nc-kernels-generic`'s matmul/dot/axpy/norm2, `nc-sparse`'s CSR SpMV,
+//! selected LP solvers, and `nc-iterative`'s CSR weighted/penalized
+//! least-squares solves. The latter are the stable statistical bridge for
+//! sparse GAM and IRLS workloads: their sparse design and penalty operators
+//! remain CSR across the Swift/Rust boundary and the result makes convergence
+//! explicit.
 //!
 //! ## Why `Vec<f64>` copies, not shared buffers
 //! UniFFI's proc-macro `#[export]` surface passes plain values
@@ -54,6 +54,7 @@
 //! established "don't build ahead of need" principle — see ADR 0006's
 //! update.
 
+use nc_iterative::StatisticalSolveError;
 use nc_kernels_generic as kernels;
 use nc_sparse::CsrMatrix;
 use std::sync::{Arc, Mutex};
@@ -100,6 +101,21 @@ impl From<nc_optimize::OptimizeError> for FfiError {
     }
 }
 
+impl From<StatisticalSolveError> for FfiError {
+    fn from(err: StatisticalSolveError) -> Self {
+        match err {
+            // Malformed CSR is an input-shape error at the public boundary,
+            // consistent with the existing SpMV and LP adapters.
+            StatisticalSolveError::Sparse(err) => err.into(),
+            other @ (StatisticalSolveError::ObservationLength { .. }
+            | StatisticalSolveError::PenaltyWidth { .. }) => FfiError::DimensionMismatch {
+                message: other.to_string(),
+            },
+            other => FfiError::SolverError { message: other.to_string() },
+        }
+    }
+}
+
 /// A dense `f64` matrix crossing the FFI boundary, column-major
 /// (matching `Matrix<T>`'s Swift-side layout — ADR 0001 — so no
 /// reordering happens in either direction).
@@ -137,6 +153,51 @@ pub struct FfiCsrMatrixF32 {
     pub row_ptr: Vec<u32>,
     pub col_indices: Vec<u32>,
     pub values: Vec<f32>,
+}
+
+/// Observable outcome of a sparse weighted or penalized least-squares solve.
+///
+/// `converged` refers to the relative normal residual of the augmented CGLS
+/// system. An unconverged result is diagnostic information, not a valid fitted
+/// model; callers must require `converged` before using `solution` for
+/// inference or prediction.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiSparseStatisticalSolveResult {
+    pub solution: Vec<f64>,
+    pub iterations: u64,
+    pub residual_norm: f64,
+    pub converged: bool,
+    pub weighted_residual_sum_of_squares: f64,
+    pub penalty_contribution: f64,
+    pub objective: f64,
+}
+
+fn to_csr_f64(matrix: FfiCsrMatrixF64) -> Result<CsrMatrix<f64>, FfiError> {
+    Ok(CsrMatrix::new(
+        matrix.rows as usize,
+        matrix.cols as usize,
+        matrix.row_ptr.into_iter().map(|value| value as usize).collect(),
+        matrix.col_indices.into_iter().map(|value| value as usize).collect(),
+        matrix.values,
+    )?)
+}
+
+fn from_statistical_solve(result: nc_iterative::StatisticalSolveResult) -> FfiSparseStatisticalSolveResult {
+    FfiSparseStatisticalSolveResult {
+        objective: result.objective(),
+        solution: result.solution,
+        iterations: result.iterations as u64,
+        residual_norm: result.residual_norm,
+        converged: result.converged,
+        weighted_residual_sum_of_squares: result.weighted_residual_sum_of_squares,
+        penalty_contribution: result.penalty_contribution,
+    }
+}
+
+fn statistical_iteration_limit(max_iterations: u64) -> Result<usize, FfiError> {
+    usize::try_from(max_iterations).map_err(|_| FfiError::SolverError {
+        message: "max_iterations does not fit this platform".to_owned(),
+    })
 }
 
 #[uniffi::export]
@@ -229,13 +290,7 @@ pub fn norm2_f32(x: Vec<f32>) -> f32 {
 
 #[uniffi::export]
 pub fn spmv_f64(matrix: FfiCsrMatrixF64, x: Vec<f64>) -> Result<Vec<f64>, FfiError> {
-    let csr = CsrMatrix::new(
-        matrix.rows as usize,
-        matrix.cols as usize,
-        matrix.row_ptr.iter().map(|&v| v as usize).collect(),
-        matrix.col_indices.iter().map(|&v| v as usize).collect(),
-        matrix.values,
-    )?;
+    let csr = to_csr_f64(matrix)?;
     Ok(csr.spmv(&x)?)
 }
 
@@ -250,6 +305,48 @@ pub fn spmv_f32(matrix: FfiCsrMatrixF32, x: Vec<f32>) -> Result<Vec<f32>, FfiErr
         matrix.values,
     )?;
     Ok(csr.spmv(&x)?)
+}
+
+/// Solve `min Σᵢ wᵢ(yᵢ − xᵢᵀβ)²` using CGLS over a CSR design matrix.
+///
+/// Zero weights exclude observations. The solve is intentionally iterative;
+/// inspect `converged` before accepting the returned coefficients.
+#[uniffi::export]
+pub fn solve_sparse_weighted_least_squares(
+    design: FfiCsrMatrixF64,
+    response: Vec<f64>,
+    weights: Vec<f64>,
+    max_iterations: u64,
+    tolerance: f64,
+) -> Result<FfiSparseStatisticalSolveResult, FfiError> {
+    let design = to_csr_f64(design)?;
+    let max_iterations = statistical_iteration_limit(max_iterations)?;
+    let result = nc_iterative::weighted_least_squares(
+        &design, &response, &weights, max_iterations, tolerance,
+    )?;
+    Ok(from_statistical_solve(result))
+}
+
+/// Solve `min Σᵢ wᵢ(yᵢ − xᵢᵀβ)² + λ‖Pβ‖²` using matrix-free CGLS over
+/// CSR design and penalty operators. `penalty` must have one column per
+/// design coefficient and `penalty_weight` must be finite and positive.
+#[uniffi::export]
+pub fn solve_sparse_penalized_weighted_least_squares(
+    design: FfiCsrMatrixF64,
+    response: Vec<f64>,
+    weights: Vec<f64>,
+    penalty: FfiCsrMatrixF64,
+    penalty_weight: f64,
+    max_iterations: u64,
+    tolerance: f64,
+) -> Result<FfiSparseStatisticalSolveResult, FfiError> {
+    let design = to_csr_f64(design)?;
+    let penalty = to_csr_f64(penalty)?;
+    let max_iterations = statistical_iteration_limit(max_iterations)?;
+    let result = nc_iterative::penalized_weighted_least_squares(
+        &design, &response, &weights, &penalty, penalty_weight, max_iterations, tolerance,
+    )?;
+    Ok(from_statistical_solve(result))
 }
 
 // ---------------------------------------------------------------------
@@ -573,6 +670,79 @@ mod tests {
         };
         let result = spmv_f32(matrix, vec![1.0, 1.0, 1.0]).unwrap();
         assert_eq!(result, vec![3.0, 3.0]);
+    }
+
+    #[test]
+    fn sparse_weighted_least_squares_crosses_the_ffi_boundary() {
+        let design = FfiCsrMatrixF64 {
+            rows: 4,
+            cols: 2,
+            row_ptr: vec![0, 1, 3, 5, 7],
+            col_indices: vec![0, 0, 1, 0, 1, 0, 1],
+            values: vec![1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 3.0],
+        };
+        let result = solve_sparse_weighted_least_squares(
+            design,
+            vec![1.0, 3.0, 5.0, 100.0],
+            vec![1.0, 1.0, 1.0, 0.0],
+            20,
+            1e-12,
+        ).unwrap();
+
+        assert!(result.converged);
+        assert!((result.solution[0] - 1.0).abs() < 1e-10);
+        assert!((result.solution[1] - 2.0).abs() < 1e-10);
+        assert!(result.weighted_residual_sum_of_squares < 1e-18);
+        assert_eq!(result.penalty_contribution, 0.0);
+        assert!(result.objective < 1e-18);
+    }
+
+    #[test]
+    fn sparse_penalized_least_squares_preserves_objective_terms_over_ffi() {
+        let design = FfiCsrMatrixF64 {
+            rows: 3,
+            cols: 2,
+            row_ptr: vec![0, 2, 4, 6],
+            col_indices: vec![0, 1, 0, 1, 0, 1],
+            values: vec![1.0; 6],
+        };
+        let penalty = FfiCsrMatrixF64 {
+            rows: 2,
+            cols: 2,
+            row_ptr: vec![0, 1, 2],
+            col_indices: vec![0, 1],
+            values: vec![1.0, 1.0],
+        };
+        let result = solve_sparse_penalized_weighted_least_squares(
+            design, vec![2.0, 2.0, 2.0], vec![1.0, 1.0, 1.0],
+            penalty, 1.0, 20, 1e-12,
+        ).unwrap();
+
+        assert!(result.converged);
+        assert!((result.solution[0] - 6.0 / 7.0).abs() < 1e-10);
+        assert!((result.solution[1] - 6.0 / 7.0).abs() < 1e-10);
+        assert!((result.weighted_residual_sum_of_squares - 12.0 / 49.0).abs() < 1e-10);
+        assert!((result.penalty_contribution - 72.0 / 49.0).abs() < 1e-10);
+        assert!((result.objective - 12.0 / 7.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn sparse_statistics_distinguish_malformed_csr_from_solver_input_errors() {
+        let malformed = FfiCsrMatrixF64 {
+            rows: 1, cols: 1, row_ptr: vec![0, 1], col_indices: vec![2], values: vec![1.0],
+        };
+        assert!(matches!(
+            solve_sparse_weighted_least_squares(malformed, vec![1.0], vec![1.0], 10, 1e-8),
+            Err(FfiError::DimensionMismatch { .. })
+        ));
+
+        let valid = FfiCsrMatrixF64 {
+            rows: 1, cols: 1, row_ptr: vec![0, 1], col_indices: vec![0], values: vec![1.0],
+        };
+        assert!(matches!(
+            solve_sparse_weighted_least_squares(valid, vec![1.0], vec![-1.0], 10, 1e-8),
+            Err(FfiError::SolverError { .. })
+        ));
     }
 
     fn ampl_example_ffi_problem() -> FfiProblem {

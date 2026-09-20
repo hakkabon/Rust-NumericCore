@@ -48,6 +48,12 @@ jobs:
             echo "stray *.swift inside XCFramework Headers/" >&2; exit 1
           fi
 
+      - name: Verify sparse-statistics UniFFI exports
+        run: |
+          BINDINGS=target/xcframework/bindings/nc_ffi.swift
+          grep -q 'solveSparseWeightedLeastSquares' "${BINDINGS}"
+          grep -q 'solveSparsePenalizedWeightedLeastSquares' "${BINDINGS}"
+
       - name: Compute checksum
         id: checksum
         run: |

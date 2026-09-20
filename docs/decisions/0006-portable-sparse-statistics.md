@@ -42,6 +42,9 @@ presented as a fitted model.
 - This is an iterative solver, not a replacement for Swift's rank-revealing
   QR on small dense problems. It intentionally does not claim numerical rank,
   effective degrees of freedom, covariance, or penalty selection.
-- The Rust API ships before a UniFFI export. A later FFI release must update
-  the framework and generated bindings together; exposing it prematurely
-  would make Swift-NumericCore's checked-in binary target inconsistent.
+- The UniFFI bridge exports the two solves and the full convergence/objective
+  result as `FfiSparseStatisticalSolveResult`. Rust release automation verifies
+  that generated Swift bindings contain both exports, while Swift-NumericCore's
+  sync workflow refreshes bindings and the checksummed XCFramework together.
+  That lockstep update is required: source bindings and framework ABI are one
+  release unit.

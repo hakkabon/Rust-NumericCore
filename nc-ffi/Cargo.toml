@@ -13,6 +13,7 @@ crate-type = ["staticlib", "cdylib", "lib"]
 [dependencies]
 nc-core.workspace = true
 nc-sparse.workspace = true
+nc-iterative.workspace = true
 nc-kernels-generic.workspace = true
 nc-optimize.workspace = true
 uniffi = "0.27"
