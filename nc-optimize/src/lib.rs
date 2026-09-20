@@ -23,6 +23,9 @@ pub use simplex::RevisedSimplexSolver;
 pub mod interior_point;
 pub use interior_point::InteriorPointSolver;
 
+pub mod branch_and_bound;
+pub use branch_and_bound::BranchAndBoundSolver;
+
 /// Bound on a variable or constraint. `None` means unbounded in that
 /// direction (`-inf` / `+inf`).
 #[derive(Debug, Clone, Copy)]
@@ -61,6 +64,17 @@ pub struct Problem {
     pub constraints: CsrMatrix<f64>,
     pub row_bounds: Vec<Bound>,
     pub var_bounds: Vec<Bound>,
+    /// `is_integer[j]` restricts variable `j` to integer values.
+    /// Length must match `objective`/`var_bounds`. All-`false` recovers
+    /// a pure LP — `RevisedSimplexSolver`/`InteriorPointSolver` both
+    /// ignore this field entirely (they solve the LP relaxation
+    /// regardless of its contents); only `BranchAndBoundSolver` reads
+    /// it. Added alongside `BranchAndBoundSolver` rather than
+    /// speculatively with the original `Problem` definition — see
+    /// `docs/decisions/0004-optimize-sequencing.md`'s update for why
+    /// this is exactly the "breaking addition" that ADR anticipated
+    /// MILP would eventually need.
+    pub is_integer: Vec<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +134,7 @@ mod tests {
             constraints: CsrMatrix::new(1, 1, vec![0, 1], vec![0], vec![1.0]).unwrap(),
             row_bounds: vec![Bound { lower: None, upper: Some(10.0) }],
             var_bounds: vec![Bound { lower: Some(0.0), upper: None }],
+            is_integer: vec![false],
         };
         let result = StubSolver.solve(&problem);
         assert!(matches!(result, Err(OptimizeError::NotImplemented(_))));

@@ -304,6 +304,7 @@ pub struct FfiSolution {
 }
 
 fn to_domain_problem(problem: FfiProblem) -> Result<nc_optimize::Problem, FfiError> {
+    let variable_count = problem.objective.len();
     let constraints = CsrMatrix::new(
         problem.constraints.rows as usize,
         problem.constraints.cols as usize,
@@ -316,6 +317,15 @@ fn to_domain_problem(problem: FfiProblem) -> Result<nc_optimize::Problem, FfiErr
         constraints,
         row_bounds: problem.row_bounds.into_iter().map(to_domain_bound).collect(),
         var_bounds: problem.var_bounds.into_iter().map(to_domain_bound).collect(),
+        // FfiProblem has no integrality information yet — every
+        // problem crossing the FFI boundary today is solved as a pure
+        // LP. `nc_optimize::BranchAndBoundSolver` exists on the Rust
+        // side but isn't exported here yet; that's the natural next
+        // patch (needs FfiProblem to grow an `is_integer: Vec<bool>`
+        // field, which is a breaking change to the FFI record and the
+        // Swift-side `FFIProblem`/`Solve.swift` call sites — deliberately
+        // not bundled into this one).
+        is_integer: vec![false; variable_count],
     })
 }
 

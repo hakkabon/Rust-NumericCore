@@ -479,7 +479,7 @@ mod tests {
             row_ptr.push(col_indices.len());
         }
         let constraints = CsrMatrix::new(m, n, row_ptr, col_indices, values).unwrap();
-        Problem { objective, constraints, row_bounds, var_bounds }
+        Problem { objective, constraints, row_bounds, var_bounds, is_integer: vec![false; n] }
     }
 
     #[test]

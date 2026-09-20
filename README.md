@@ -27,7 +27,7 @@ Rust-NumericCore/
 ├── nc-sparse/            # CSR sparse matrices + SpMV — implemented
 ├── nc-decomp/            # dense Cholesky solve (cholesky_solve), added for nc-optimize's interior-point normal equations
 ├── nc-iterative/         # Conjugate Gradient implemented; GMRES/BiCGStab/Lanczos not yet
-├── nc-optimize/          # LP/MILP/NLP Problem/Solver interface — the AMPL back end; RevisedSimplexSolver and InteriorPointSolver both implemented
+├── nc-optimize/          # LP/MILP/NLP Problem/Solver interface — RevisedSimplexSolver, InteriorPointSolver, BranchAndBoundSolver (MILP) all implemented
 ├── nc-ffi/               # UniFFI surface — matmul/dot/axpy/norm2/spmv (f64+f32), opt-in FfiVectorF64/F32 zero-copy buffers, solve_lp_simplex/solve_lp_interior_point
 ├── nc-bench/             # Criterion benchmarks (needs a newer cargo than 1.75 for its deps)
 ├── scripts/

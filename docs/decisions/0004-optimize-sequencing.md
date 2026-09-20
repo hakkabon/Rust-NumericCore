@@ -114,3 +114,38 @@ the test cases solve the exact same problems already hand-verified for
 independently-derived iteration converges to the same optimum simplex
 found by an entirely different method — a real cross-validation, not
 just two solvers separately trusting their own hand-computed answers.
+
+## Update (MILP: branch-and-bound implemented)
+`nc-optimize::branch_and_bound::BranchAndBoundSolver` — LP-relaxation
+branch-and-bound, wrapping `RevisedSimplexSolver` (pluggable, but
+documented as the required default — see that module's docs on why
+`InteriorPointSolver`'s heuristic unboundedness detection and its
+equality/fixed-variable rejection make it a poor fit as the relaxation
+solver here, since a branch's floor/ceil bound can easily pin a
+variable to a single value). `Problem` gained the `is_integer: Vec<bool>`
+field this ADR's original text anticipated MILP would need — every
+existing `Solver` (`RevisedSimplexSolver`, `InteriorPointSolver`)
+ignores it entirely; only `BranchAndBoundSolver` reads it.
+
+Depth-first search, most-fractional-variable branching, a single
+pruning rule (relaxation bound no better than the current incumbent),
+and a node-count cap rather than a proven-optimal stopping rule —
+matches this whole LP/MILP path's established "smallish problems,
+document the honest simplification rather than attempt full production
+sophistication" stance. 7/7 new tests pass, including a classic
+2-variable MILP whose LP relaxation lands on a genuinely fractional
+vertex (verified by hand: relaxation optimum (3, 1.5) objective 21;
+integer optimum (4, 0) objective 20, confirmed by enumerating every
+nearby feasible integer point) and a 0/1 knapsack. Full workspace green
+(`nc-ffi`'s 28 tests included, confirming the `Problem.is_integer`
+field addition didn't disturb the existing LP-only FFI path, which
+always passes `is_integer: vec![false; n]` today).
+
+**Not yet wired through FFI/AMPL** — `FfiProblem` has no integrality
+field yet, so `solve_lp_simplex`/`solve_lp_interior_point` remain
+LP-only from Swift's perspective, and `BranchAndBoundSolver` isn't
+exported to `nc-ffi` at all yet. That's a real, separate, breaking
+change to `FfiProblem` and the Swift-side `FFIProblem`/`Solve.swift`
+call sites — deliberately not bundled into this update, matching how
+LP's own FFI wiring was kept as its own later step after the solvers
+themselves were proven.
