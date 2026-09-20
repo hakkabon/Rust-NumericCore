@@ -10,3 +10,4 @@ description = "Iterative solvers (CG, GMRES, BiCGStab, Lanczos) for large sparse
 [dependencies]
 nc-core.workspace = true
 nc-sparse.workspace = true
+thiserror.workspace = true

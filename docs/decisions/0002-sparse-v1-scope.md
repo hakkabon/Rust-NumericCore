@@ -24,7 +24,7 @@ row-oriented).
 ## Decision
 v1 implements **CSR only**, in both `nc-sparse` (Rust) and
 `NumericCoreSparse` (Swift, currently a parallel pure-Swift
-implementation pending FFI). SpMV is the only operation implemented.
+implementation pending FFI). SpMV is the initial operation.
 
 COO is deferred until the AMPL presolve layer actually needs
 incremental construction (at which point a `COO → CSR` conversion
@@ -43,6 +43,22 @@ factorization needs it.
   workaround until COO exists.
 - Any future factorization needing CSC will require a real (not
   trivial) addition, not a quick wrapper.
+
+## Update — transpose products for portable sparse statistics
+
+`nc-iterative` now has a concrete statistical consumer: CGLS weighted and
+penalized least squares requires both `A·x` and `Aᵀ·r`. CSR remains the right
+format: `transpose_spmv` accumulates directly over CSR entries without
+materializing a transpose or adding a competing CSC representation. This is
+an O(nnz) adjoint product and is sufficient for matrix-free sparse design and
+penalty operators.
+
+The CSR constructor now validates the whole row-pointer invariant (starts at
+zero, monotonic, bounded by nnz, ends at nnz), not just length. That makes the
+new statistical iteration safe against malformed sparse input before either
+forward or transpose traversal can index incorrectly. CSC and sparse direct
+factorizations remain deferred; the update adds only the adjoint operation a
+measured least-squares consumer requires.
 
 ## Alternatives considered
 - **Implement COO, CSR, and CSC upfront.** Rejected: no current consumer

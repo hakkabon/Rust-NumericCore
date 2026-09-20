@@ -19,6 +19,18 @@ pub enum SparseError {
     #[error("row_ptr length {actual} does not match rows+1 ({expected})")]
     RowPtrLength { expected: usize, actual: usize },
 
+    #[error("row_ptr must start at zero, found {actual}")]
+    RowPtrStart { actual: usize },
+
+    #[error("row_ptr is not monotonic at index {index}: {previous} then {actual}")]
+    RowPtrNotMonotonic { index: usize, previous: usize, actual: usize },
+
+    #[error("row_ptr entry {index} is {actual}, beyond nnz {nnz}")]
+    RowPtrOutOfBounds { index: usize, actual: usize, nnz: usize },
+
+    #[error("row_ptr must end at nnz {expected}, found {actual}")]
+    RowPtrEnd { expected: usize, actual: usize },
+
     #[error("col_indices length {col_indices} does not match values length {values}")]
     ColValuesMismatch { col_indices: usize, values: usize },
 
@@ -58,6 +70,23 @@ impl<T: Copy + Default + std::ops::Add<Output = T> + std::ops::Mul<Output = T>> 
                 col_indices: col_indices.len(),
                 values: values.len(),
             });
+        }
+        if row_ptr.first().copied() != Some(0) {
+            return Err(SparseError::RowPtrStart { actual: row_ptr.first().copied().unwrap_or_default() });
+        }
+        let nnz = values.len();
+        for (index, &pointer) in row_ptr.iter().enumerate() {
+            if pointer > nnz {
+                return Err(SparseError::RowPtrOutOfBounds { index, actual: pointer, nnz });
+            }
+            if index > 0 && pointer < row_ptr[index - 1] {
+                return Err(SparseError::RowPtrNotMonotonic {
+                    index, previous: row_ptr[index - 1], actual: pointer,
+                });
+            }
+        }
+        if row_ptr[rows] != nnz {
+            return Err(SparseError::RowPtrEnd { expected: nnz, actual: row_ptr[rows] });
         }
         if let Some(&bad) = col_indices.iter().find(|&&c| c >= cols) {
             return Err(SparseError::ColumnOutOfBounds { index: bad, cols });
@@ -118,6 +147,29 @@ impl<T: Copy + Default + std::ops::Add<Output = T> + std::ops::Mul<Output = T>> 
         }
         Ok(y)
     }
+
+    /// Sparse transpose-matrix-vector product: `y = Aᵀ * x`.
+    ///
+    /// CSR is row-oriented, so this performs one accumulation per stored
+    /// entry rather than materializing a CSC/transpose representation. It is
+    /// the adjoint required by portable sparse least-squares iterations.
+    pub fn transpose_spmv(&self, x: &[T]) -> Result<Vec<T>, SparseError> {
+        if x.len() != self.rows {
+            return Err(SparseError::DimensionMismatch {
+                rows: self.rows,
+                cols: self.cols,
+                vec_len: x.len(),
+            });
+        }
+        let mut y = vec![T::default(); self.cols];
+        for row in 0..self.rows {
+            for index in self.row_ptr[row]..self.row_ptr[row + 1] {
+                let column = self.col_indices[index];
+                y[column] = y[column] + self.values[index] * x[row];
+            }
+        }
+        Ok(y)
+    }
 }
 
 #[cfg(test)]
@@ -146,6 +198,33 @@ mod tests {
     fn spmv_rejects_dimension_mismatch() {
         let m = sample();
         assert!(m.spmv(&[1.0, 1.0]).is_err());
+    }
+
+    #[test]
+    fn transpose_spmv_matches_hand_computation() {
+        let m = sample(); // [[1, 0, 2], [0, 3, 0]]
+        let y = m.transpose_spmv(&[4.0, 5.0]).unwrap();
+        assert_eq!(y, vec![4.0, 15.0, 8.0]);
+    }
+
+    #[test]
+    fn rejects_invalid_row_pointer_structure_before_multiplication() {
+        assert!(matches!(
+            CsrMatrix::<f64>::new(1, 1, vec![1, 1], vec![], vec![]),
+            Err(SparseError::RowPtrStart { .. })
+        ));
+        assert!(matches!(
+            CsrMatrix::<f64>::new(2, 1, vec![0, 2, 1], vec![0], vec![1.0]),
+            Err(SparseError::RowPtrOutOfBounds { .. })
+        ));
+        assert!(matches!(
+            CsrMatrix::<f64>::new(2, 1, vec![0, 1, 0], vec![0], vec![1.0]),
+            Err(SparseError::RowPtrNotMonotonic { .. })
+        ));
+        assert!(matches!(
+            CsrMatrix::<f64>::new(1, 1, vec![0, 0], vec![0], vec![1.0]),
+            Err(SparseError::RowPtrEnd { .. })
+        ));
     }
 
     #[test]
