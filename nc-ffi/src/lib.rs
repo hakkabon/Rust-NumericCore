@@ -350,18 +350,20 @@ pub fn solve_sparse_penalized_weighted_least_squares(
 }
 
 // ---------------------------------------------------------------------
-// LP solving — closes the loop from NumericCoreAMPL's CompiledProblem
-// through to nc-optimize::{RevisedSimplexSolver, InteriorPointSolver}.
+// LP/MILP solving — closes the loop from NumericCoreAMPL's
+// CompiledProblem through to
+// nc-optimize::{RevisedSimplexSolver, InteriorPointSolver, BranchAndBoundSolver}.
 //
 // `FfiBound`/`FfiProblem`/`FfiSolution`/`FfiSolveStatus` mirror
 // `nc_optimize`'s `Bound`/`Problem`/`Solution`/`SolveStatus` field for
 // field — this file's job is only the boundary crossing, not any new
-// logic. `solve_lp_simplex`/`solve_lp_interior_point` are separate
-// exported functions rather than one function taking a solver-choice
-// enum, matching the explicit (not policy-based) solver selection
-// decision from `nc-optimize`'s ADR 0004 update — the choice is made in
-// Swift by which function it calls, not by a parameter this file has
-// to validate.
+// logic. `solve_lp_simplex`/`solve_lp_interior_point`/
+// `solve_milp_branch_and_bound` are three separate exported functions
+// rather than one function taking a solver-choice enum, matching the
+// explicit (not policy-based) solver selection decision from
+// `nc-optimize`'s ADR 0004 update — the choice is made in Swift by
+// which function it calls, not by a parameter this file has to
+// validate.
 // ---------------------------------------------------------------------
 
 /// Mirrors `nc_optimize::Bound`. `None` means unbounded in that
@@ -381,6 +383,12 @@ pub struct FfiProblem {
     pub constraints: FfiCsrMatrixF64,
     pub row_bounds: Vec<FfiBound>,
     pub var_bounds: Vec<FfiBound>,
+    /// Mirrors `nc_optimize::Problem::is_integer`. Length must match
+    /// `objective`/`var_bounds`. Ignored entirely by
+    /// `solve_lp_simplex`/`solve_lp_interior_point` (an LP relaxation
+    /// is well-defined regardless of its contents); only
+    /// `solve_milp_branch_and_bound` reads it.
+    pub is_integer: Vec<bool>,
 }
 
 /// Mirrors `nc_optimize::SolveStatus`.
@@ -409,20 +417,22 @@ fn to_domain_problem(problem: FfiProblem) -> Result<nc_optimize::Problem, FfiErr
         problem.constraints.col_indices.iter().map(|&v| v as usize).collect(),
         problem.constraints.values,
     )?;
+    let is_integer = if problem.is_integer.is_empty() {
+        // Older callers (before this field existed) or a caller that
+        // genuinely has no integer variables both send an empty list —
+        // treat as "all continuous" rather than a length-mismatch error;
+        // a real length mismatch (non-empty but wrong length) is still
+        // caught by BranchAndBoundSolver itself.
+        vec![false; variable_count]
+    } else {
+        problem.is_integer
+    };
     Ok(nc_optimize::Problem {
         objective: problem.objective,
         constraints,
         row_bounds: problem.row_bounds.into_iter().map(to_domain_bound).collect(),
         var_bounds: problem.var_bounds.into_iter().map(to_domain_bound).collect(),
-        // FfiProblem has no integrality information yet — every
-        // problem crossing the FFI boundary today is solved as a pure
-        // LP. `nc_optimize::BranchAndBoundSolver` exists on the Rust
-        // side but isn't exported here yet; that's the natural next
-        // patch (needs FfiProblem to grow an `is_integer: Vec<bool>`
-        // field, which is a breaking change to the FFI record and the
-        // Swift-side `FFIProblem`/`Solve.swift` call sites — deliberately
-        // not bundled into this one).
-        is_integer: vec![false; variable_count],
+        is_integer,
     })
 }
 
@@ -467,6 +477,23 @@ pub fn solve_lp_interior_point(problem: FfiProblem) -> Result<FfiSolution, FfiEr
     use nc_optimize::Solver;
     let domain_problem = to_domain_problem(problem)?;
     let solution = nc_optimize::InteriorPointSolver::default().solve(&domain_problem)?;
+    Ok(from_domain_solution(solution))
+}
+
+/// Solves `problem` via `nc_optimize::BranchAndBoundSolver` (default
+/// configuration — depth-first, `RevisedSimplexSolver` as the LP
+/// relaxation solver). `problem.is_integer` selects which variables are
+/// integer-restricted; an empty list is treated as "all continuous"
+/// (see `to_domain_problem`), which for this function specifically
+/// means it will solve a plain LP with no branching at all — not
+/// useful on its own, but harmless, and avoids a separate "did you mean
+/// to call solve_lp_simplex instead?" error for what is otherwise a
+/// valid (if pointless) call.
+#[uniffi::export]
+pub fn solve_milp_branch_and_bound(problem: FfiProblem) -> Result<FfiSolution, FfiError> {
+    use nc_optimize::Solver;
+    let domain_problem = to_domain_problem(problem)?;
+    let solution = nc_optimize::BranchAndBoundSolver::default().solve(&domain_problem)?;
     Ok(from_domain_solution(solution))
 }
 
@@ -767,6 +794,7 @@ mod tests {
                 FfiBound { lower: Some(0.0), upper: None },
                 FfiBound { lower: Some(0.0), upper: Some(10.0) },
             ],
+            is_integer: vec![],
         }
     }
 
@@ -813,6 +841,7 @@ mod tests {
                 FfiBound { lower: Some(2.0), upper: None },
             ],
             var_bounds: vec![FfiBound { lower: Some(0.0), upper: None }],
+            is_integer: vec![],
         };
         let solution = solve_lp_simplex(problem).unwrap();
         assert_eq!(solution.status, FfiSolveStatus::Infeasible);
@@ -834,6 +863,7 @@ mod tests {
             },
             row_bounds: vec![FfiBound { lower: Some(5.0), upper: Some(5.0) }],
             var_bounds: vec![FfiBound { lower: Some(0.0), upper: Some(10.0) }],
+            is_integer: vec![],
         };
         let result = solve_lp_interior_point(problem);
         assert!(matches!(result, Err(FfiError::SolverError { .. })));
@@ -852,9 +882,76 @@ mod tests {
             },
             row_bounds: vec![FfiBound { lower: None, upper: Some(1.0) }],
             var_bounds: vec![FfiBound { lower: Some(0.0), upper: None }],
+            is_integer: vec![],
         };
         let result = solve_lp_simplex(problem);
         assert!(matches!(result, Err(FfiError::DimensionMismatch { .. })));
+    }
+
+    #[test]
+    fn solve_milp_matches_the_known_integer_optimum() {
+        // Same classic 2-variable MILP as nc-optimize's own
+        // branch_and_bound tests: maximize 5x+4y (given here pre-negated)
+        // s.t. 6x+4y<=24, x+2y<=6, x,y>=0 integer. LP relaxation lands
+        // on a genuinely fractional vertex (3, 1.5); hand-verified
+        // integer optimum is (4, 0), objective -20.
+        let problem = FfiProblem {
+            objective: vec![-5.0, -4.0],
+            constraints: FfiCsrMatrixF64 {
+                rows: 2,
+                cols: 2,
+                row_ptr: vec![0, 2, 4],
+                col_indices: vec![0, 1, 0, 1],
+                values: vec![6.0, 4.0, 1.0, 2.0],
+            },
+            row_bounds: vec![
+                FfiBound { lower: None, upper: Some(24.0) },
+                FfiBound { lower: None, upper: Some(6.0) },
+            ],
+            var_bounds: vec![
+                FfiBound { lower: Some(0.0), upper: None },
+                FfiBound { lower: Some(0.0), upper: None },
+            ],
+            is_integer: vec![true, true],
+        };
+
+        let solution = solve_milp_branch_and_bound(problem).unwrap();
+        assert_eq!(solution.status, FfiSolveStatus::Optimal);
+        assert!((solution.variable_values[0] - 4.0).abs() < 1e-6);
+        assert!((solution.variable_values[1] - 0.0).abs() < 1e-6);
+        assert!((solution.objective_value - (-20.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn solve_milp_with_empty_is_integer_behaves_as_pure_lp() {
+        // Empty is_integer -> "all continuous" -> should match
+        // solve_lp_simplex exactly on the same problem.
+        let problem = ampl_example_ffi_problem();
+        let milp_solution = solve_milp_branch_and_bound(problem.clone()).unwrap();
+        let lp_solution = solve_lp_simplex(problem).unwrap();
+        assert_eq!(milp_solution.status, lp_solution.status);
+        assert!((milp_solution.objective_value - lp_solution.objective_value).abs() < 1e-9);
+    }
+
+    #[test]
+    fn solve_milp_detects_infeasibility_caused_by_integrality() {
+        // minimize x s.t. 2x = 1, x integer, x in [0, 10] - the LP
+        // relaxation (x = 0.5) is feasible but no integer x satisfies it.
+        let problem = FfiProblem {
+            objective: vec![1.0],
+            constraints: FfiCsrMatrixF64 {
+                rows: 1,
+                cols: 1,
+                row_ptr: vec![0, 1],
+                col_indices: vec![0],
+                values: vec![2.0],
+            },
+            row_bounds: vec![FfiBound { lower: Some(1.0), upper: Some(1.0) }],
+            var_bounds: vec![FfiBound { lower: Some(0.0), upper: Some(10.0) }],
+            is_integer: vec![true],
+        };
+        let solution = solve_milp_branch_and_bound(problem).unwrap();
+        assert_eq!(solution.status, FfiSolveStatus::Infeasible);
     }
 
     #[test]

@@ -28,7 +28,7 @@ Rust-NumericCore/
 ├── nc-decomp/            # dense Cholesky solve (cholesky_solve), added for nc-optimize's interior-point normal equations
 ├── nc-iterative/         # CG plus CGLS weighted/penalized sparse statistics; GMRES/BiCGStab/Lanczos deferred
 ├── nc-optimize/          # LP/MILP/NLP Problem/Solver interface — RevisedSimplexSolver, InteriorPointSolver, BranchAndBoundSolver (MILP) all implemented
-├── nc-ffi/               # UniFFI surface — matmul/dot/axpy/norm2/spmv (f64+f32), opt-in FfiVectorF64/F32 zero-copy buffers, solve_lp_simplex/solve_lp_interior_point
+├── nc-ffi/               # UniFFI surface — matmul/dot/axpy/norm2/spmv (f64+f32), opt-in FfiVectorF64/F32 zero-copy buffers, solve_lp_simplex/solve_lp_interior_point/solve_milp_branch_and_bound
 ├── nc-bench/             # Criterion benchmarks (needs a newer cargo than 1.75 for its deps)
 ├── scripts/
 │   └── build-xcframework.sh   # builds the XCFramework + Swift bindings; used locally and by release.yml

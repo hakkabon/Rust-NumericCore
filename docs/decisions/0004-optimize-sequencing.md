@@ -141,11 +141,20 @@ nearby feasible integer point) and a 0/1 knapsack. Full workspace green
 field addition didn't disturb the existing LP-only FFI path, which
 always passes `is_integer: vec![false; n]` today).
 
-**Not yet wired through FFI/AMPL** — `FfiProblem` has no integrality
-field yet, so `solve_lp_simplex`/`solve_lp_interior_point` remain
-LP-only from Swift's perspective, and `BranchAndBoundSolver` isn't
-exported to `nc-ffi` at all yet. That's a real, separate, breaking
-change to `FfiProblem` and the Swift-side `FFIProblem`/`Solve.swift`
-call sites — deliberately not bundled into this update, matching how
-LP's own FFI wiring was kept as its own later step after the solvers
-themselves were proven.
+## Update (MILP: wired through FFI)
+`FfiProblem` gained `is_integer: Vec<bool>` and `nc-ffi` now exports
+`solve_milp_branch_and_bound`, mirroring the pattern already
+established for the two LP solvers. An empty `is_integer` list is
+treated as "all continuous" (backward-compatible with callers built
+against the pre-integrality `FfiProblem` shape, and with a caller that
+genuinely has no integer variables) rather than a length-mismatch
+error — a real length mismatch (non-empty but wrong length) is still
+caught by `BranchAndBoundSolver` itself. 34/34 tests pass in `nc-ffi`
+(31 previous + 3 new), including the same classic 2-variable MILP
+already hand-verified on the Rust side crossing the FFI boundary
+correctly, an empty-`is_integer` call matching `solve_lp_simplex`
+exactly on the same problem, and integrality-caused infeasibility
+detection. Full workspace green. Wiring `NumericCoreAMPL`'s Swift side
+(a `var x integer;` grammar keyword, `Model`/`CompiledProblem` carrying
+per-variable integrality, `Solve.swift` gaining a `.branchAndBound`
+case) is the follow-up on the Swift-NumericCore side.
