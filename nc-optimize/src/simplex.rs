@@ -69,6 +69,11 @@ impl Solver for RevisedSimplexSolver {
     }
 
     fn solve(&self, problem: &Problem) -> Result<Solution, OptimizeError> {
+        if self.max_iterations == 0 || !self.tolerance.is_finite() || self.tolerance <= 0.0 {
+            return Err(OptimizeError::InvalidConfiguration(
+                "revised simplex requires max_iterations > 0 and finite tolerance > 0",
+            ));
+        }
         let mut workspace = Workspace::new(problem)?;
         let n = problem.objective.len();
         let tol = self.tolerance;

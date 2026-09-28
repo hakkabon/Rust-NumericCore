@@ -94,6 +94,20 @@ impl Solver for InteriorPointSolver {
     }
 
     fn solve(&self, problem: &Problem) -> Result<Solution, OptimizeError> {
+        if self.max_iterations == 0
+            || !self.tolerance.is_finite()
+            || self.tolerance <= 0.0
+            || !self.sigma.is_finite()
+            || !(0.0..1.0).contains(&self.sigma)
+            || !self.big_bound.is_finite()
+            || self.big_bound <= 0.0
+            || !self.step_fraction.is_finite()
+            || !(0.0..1.0).contains(&self.step_fraction)
+        {
+            return Err(OptimizeError::InvalidConfiguration(
+                "interior point requires positive iterations/tolerance/big_bound and sigma/step_fraction in (0, 1)",
+            ));
+        }
         let workspace = Workspace::new(problem, self.big_bound)?;
         workspace.run(problem, self)
     }

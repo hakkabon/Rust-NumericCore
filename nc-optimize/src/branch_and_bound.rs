@@ -116,6 +116,14 @@ impl Solver for BranchAndBoundSolver {
     }
 
     fn solve(&self, problem: &Problem) -> Result<Solution, OptimizeError> {
+        if self.max_nodes == 0
+            || !self.integer_tolerance.is_finite()
+            || self.integer_tolerance <= 0.0
+        {
+            return Err(OptimizeError::InvalidConfiguration(
+                "branch-and-bound requires max_nodes > 0 and finite integer_tolerance > 0",
+            ));
+        }
         if problem.is_integer.len() != problem.objective.len() {
             return Err(OptimizeError::NotImplemented(
                 "branch-and-bound: is_integer length must match objective length",
