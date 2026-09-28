@@ -28,19 +28,18 @@
 //!   closest to `x.floor() + 0.5`), not pseudocost or strong branching.
 //!   Simpler, correct, slower to converge on hard instances — a real
 //!   future improvement, not a correctness gap.
-//! - **Depth-first search**, not best-first/best-bound. Uses less
-//!   memory (a stack of node bound-overrides, not a priority queue of
-//!   fully-expanded nodes) and finds *a* feasible incumbent quickly,
-//!   at the cost of not necessarily closing the optimality gap as fast
-//!   as best-first would on a large tree. Matches this project's
-//!   "smallish problems" framing for the whole LP/MILP path.
-//! - **A node limit (`max_nodes`), not a rigorous gap-based stopping
-//!   rule.** If the limit is hit, the best incumbent found so far
+//! - **Selectable depth-first or best-bound search.** Best-bound is the
+//!   default because it focuses work on closing the global certificate;
+//!   depth-first remains available for memory-sensitive workloads.
+//! - **Node and rigorous gap limits.** If the node limit is hit, the best incumbent found so far
 //!   (if any) is returned with `SolveStatus::IterationLimit` — a valid
 //!   feasible solution, just not proven optimal. If no incumbent was
 //!   ever found before the limit, `IterationLimit` is returned with an
 //!   empty solution rather than misreporting `Infeasible` (the problem
 //!   might still be feasible; the search just didn't find out in time).
+//!   Absolute and relative MIP-gap tolerances can also terminate search;
+//!   `BranchAndBoundReport::termination` distinguishes that accepted
+//!   certificate from exact tree exhaustion.
 //! - **The relaxation solver is pluggable but must itself be exact for
 //!   this to be correct** — `BranchAndBoundSolver` trusts its
 //!   relaxation solver's `Optimal`/`Infeasible`/`Unbounded` reports at
@@ -57,9 +56,36 @@
 
 use crate::{Bound, OptimizeError, Problem, RevisedSimplexSolver, SolveStatus, Solution, Solver};
 
+/// Policy used to choose the next open node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeSelection {
+    /// Low memory and often finds an incumbent quickly.
+    DepthFirst,
+    /// Expands the node with the smallest valid lower bound first and
+    /// therefore concentrates work on closing the global optimality gap.
+    BestBound,
+}
+
+/// Why a branch-and-bound search returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchAndBoundTermination {
+    Exhausted,
+    GapSatisfied,
+    NodeLimit,
+    RelaxationLimit,
+    Unbounded,
+    ContinuousRelaxation,
+}
+
 pub struct BranchAndBoundSolver {
     pub max_nodes: usize,
     pub integer_tolerance: f64,
+    /// Stop with a feasible incumbent once `incumbent - best_bound`
+    /// is at most this value. Zero requires an exact closed gap.
+    pub absolute_gap_tolerance: f64,
+    /// Scale-independent counterpart to `absolute_gap_tolerance`.
+    pub relative_gap_tolerance: f64,
+    pub node_selection: NodeSelection,
     pub relaxation_solver: Box<dyn Solver>,
 }
 
@@ -72,6 +98,10 @@ pub struct BranchAndBoundReport {
     pub best_bound: Option<f64>,
     pub absolute_gap: Option<f64>,
     pub relative_gap: Option<f64>,
+    pub nodes_pruned_infeasible: usize,
+    pub nodes_pruned_by_bound: usize,
+    pub maximum_depth: usize,
+    pub termination: BranchAndBoundTermination,
 }
 
 impl Default for BranchAndBoundSolver {
@@ -79,6 +109,9 @@ impl Default for BranchAndBoundSolver {
         Self {
             max_nodes: 10_000,
             integer_tolerance: 1e-6,
+            absolute_gap_tolerance: 0.0,
+            relative_gap_tolerance: 0.0,
+            node_selection: NodeSelection::BestBound,
             relaxation_solver: Box::new(RevisedSimplexSolver::default()),
         }
     }
@@ -93,6 +126,7 @@ struct NodeBounds {
     var_bounds: Vec<Bound>,
     /// Valid lower bound inherited from this node's parent relaxation.
     lower_bound: Option<f64>,
+    depth: usize,
 }
 
 impl NodeBounds {
@@ -103,7 +137,7 @@ impl NodeBounds {
             lower: tighter_lower(current.lower, lower),
             upper: tighter_upper(current.upper, upper),
         };
-        Self { var_bounds, lower_bound: self.lower_bound }
+        Self { var_bounds, lower_bound: self.lower_bound, depth: self.depth + 1 }
     }
 }
 
@@ -142,9 +176,13 @@ impl BranchAndBoundSolver {
         if self.max_nodes == 0
             || !self.integer_tolerance.is_finite()
             || self.integer_tolerance <= 0.0
+            || !self.absolute_gap_tolerance.is_finite()
+            || self.absolute_gap_tolerance < 0.0
+            || !self.relative_gap_tolerance.is_finite()
+            || self.relative_gap_tolerance < 0.0
         {
             return Err(OptimizeError::InvalidConfiguration(
-                "branch-and-bound requires max_nodes > 0 and finite integer_tolerance > 0",
+                "branch-and-bound requires max_nodes > 0, finite integer_tolerance > 0, and finite gap tolerances >= 0",
             ));
         }
         if !problem.is_integer.iter().any(|&b| b) {
@@ -153,20 +191,23 @@ impl BranchAndBoundSolver {
             // tree with nothing to branch on.
             let solution = self.relaxation_solver.solve(problem)?;
             let bound = (solution.status == SolveStatus::Optimal).then_some(solution.objective_value);
-            return Ok(report(solution, 1, bound));
+            return Ok(report(solution, 1, bound, SearchStatistics::default(),
+                BranchAndBoundTermination::ContinuousRelaxation));
         }
 
-        let mut stack = vec![NodeBounds {
-            var_bounds: problem.var_bounds.clone(), lower_bound: None,
+        let mut frontier = vec![NodeBounds {
+            var_bounds: problem.var_bounds.clone(), lower_bound: None, depth: 0,
         }];
         let mut incumbent: Option<Solution> = None;
         let mut nodes_explored = 0usize;
+        let mut statistics = SearchStatistics::default();
         let mut search_incomplete = false;
         let mut incomplete_bound: Option<f64> = None;
 
-        while let Some(node) = stack.pop() {
+        while !frontier.is_empty() {
+            let node = pop_node(&mut frontier, self.node_selection);
             if nodes_explored == self.max_nodes {
-                let best_bound = open_best_bound(&stack, node.lower_bound);
+                let best_bound = open_best_bound(&frontier, node.lower_bound);
                 let solution = match incumbent {
                     Some(sol) => Solution { status: SolveStatus::IterationLimit, ..sol },
                     None => Solution {
@@ -175,13 +216,16 @@ impl BranchAndBoundSolver {
                         status: SolveStatus::IterationLimit,
                     },
                 };
-                return Ok(report(solution, nodes_explored, best_bound));
+                return Ok(report(solution, nodes_explored, best_bound, statistics,
+                    BranchAndBoundTermination::NodeLimit));
             }
             nodes_explored += 1;
+            statistics.maximum_depth = statistics.maximum_depth.max(node.depth);
 
             if node.var_bounds.iter().any(|bound| {
                 matches!((bound.lower, bound.upper), (Some(lower), Some(upper)) if lower > upper)
             }) {
+                statistics.nodes_pruned_infeasible += 1;
                 continue;
             }
 
@@ -197,6 +241,7 @@ impl BranchAndBoundSolver {
 
             match relaxed.status {
                 SolveStatus::Infeasible => {
+                    statistics.nodes_pruned_infeasible += 1;
                     continue; // prune: this branch has no feasible region at all
                 }
                 SolveStatus::Unbounded => {
@@ -208,7 +253,8 @@ impl BranchAndBoundSolver {
                     // Deeper in the tree, added bounds normally rule
                     // this out; if it still happens, treat it the same
                     // way.
-                    return Ok(report(relaxed, nodes_explored, None));
+                    return Ok(report(relaxed, nodes_explored, None, statistics,
+                        BranchAndBoundTermination::Unbounded));
                 }
                 SolveStatus::IterationLimit => {
                     // The relaxation itself didn't converge - can't
@@ -231,6 +277,7 @@ impl BranchAndBoundSolver {
             // in minimize form, per Presolve's convention).
             if let Some(ref best) = incumbent {
                 if relaxed.objective_value >= best.objective_value - self.integer_tolerance {
+                    statistics.nodes_pruned_by_bound += 1;
                     continue;
                 }
             }
@@ -250,8 +297,18 @@ impl BranchAndBoundSolver {
                     let mut lower = node.tightened(var_index, Some(ceil_value), None);
                     upper.lower_bound = Some(relaxed.objective_value);
                     lower.lower_bound = Some(relaxed.objective_value);
-                    stack.push(upper);
-                    stack.push(lower);
+                    frontier.push(upper);
+                    frontier.push(lower);
+                }
+            }
+
+            if let Some(ref best) = incumbent {
+                let best_bound = open_best_bound(&frontier, incomplete_bound);
+                if gap_satisfied(best.objective_value, best_bound,
+                    self.absolute_gap_tolerance, self.relative_gap_tolerance)
+                {
+                    return Ok(report(best.clone(), nodes_explored, best_bound, statistics,
+                        BranchAndBoundTermination::GapSatisfied));
                 }
             }
         }
@@ -259,35 +316,79 @@ impl BranchAndBoundSolver {
         match incumbent {
             Some(sol) if search_incomplete => {
                 let solution = Solution { status: SolveStatus::IterationLimit, ..sol };
-                Ok(report(solution, nodes_explored, incomplete_bound))
+                Ok(report(solution, nodes_explored, incomplete_bound, statistics,
+                    BranchAndBoundTermination::RelaxationLimit))
             }
             Some(sol) => {
                 let bound = Some(sol.objective_value);
-                Ok(report(sol, nodes_explored, bound))
+                Ok(report(sol, nodes_explored, bound, statistics,
+                    BranchAndBoundTermination::Exhausted))
             }
             None if search_incomplete => Ok(report(Solution {
                 variable_values: vec![], objective_value: 0.0,
                 status: SolveStatus::IterationLimit,
-            }, nodes_explored, None)),
+            }, nodes_explored, None, statistics, BranchAndBoundTermination::RelaxationLimit)),
             None => Ok(report(Solution {
                 variable_values: vec![], objective_value: 0.0,
                 status: SolveStatus::Infeasible,
-            }, nodes_explored, None)),
+            }, nodes_explored, None, statistics, BranchAndBoundTermination::Exhausted)),
         }
     }
+}
+
+#[derive(Default, Clone, Copy)]
+struct SearchStatistics {
+    nodes_pruned_infeasible: usize,
+    nodes_pruned_by_bound: usize,
+    maximum_depth: usize,
+}
+
+fn pop_node(frontier: &mut Vec<NodeBounds>, selection: NodeSelection) -> NodeBounds {
+    let index = match selection {
+        NodeSelection::DepthFirst => frontier.len() - 1,
+        NodeSelection::BestBound => frontier.iter().enumerate().min_by(|(_, a), (_, b)| {
+            a.lower_bound.unwrap_or(f64::NEG_INFINITY)
+                .total_cmp(&b.lower_bound.unwrap_or(f64::NEG_INFINITY))
+                .then_with(|| b.depth.cmp(&a.depth))
+        }).map(|(index, _)| index).expect("non-empty frontier"),
+    };
+    frontier.swap_remove(index)
+}
+
+fn gap_satisfied(
+    incumbent: f64,
+    best_bound: Option<f64>,
+    absolute_tolerance: f64,
+    relative_tolerance: f64,
+) -> bool {
+    let Some(bound) = best_bound else { return false };
+    let gap = (incumbent - bound).max(0.0);
+    gap <= absolute_tolerance || gap / incumbent.abs().max(1.0) <= relative_tolerance
 }
 
 fn open_best_bound(stack: &[NodeBounds], current: Option<f64>) -> Option<f64> {
     stack.iter().filter_map(|node| node.lower_bound).chain(current).reduce(f64::min)
 }
 
-fn report(solution: Solution, nodes_explored: usize, best_bound: Option<f64>) -> BranchAndBoundReport {
+fn report(
+    solution: Solution,
+    nodes_explored: usize,
+    best_bound: Option<f64>,
+    statistics: SearchStatistics,
+    termination: BranchAndBoundTermination,
+) -> BranchAndBoundReport {
     let has_incumbent = !solution.variable_values.is_empty();
     let absolute_gap = if has_incumbent {
         best_bound.map(|bound| (solution.objective_value - bound).max(0.0))
     } else { None };
     let relative_gap = absolute_gap.map(|gap| gap / solution.objective_value.abs().max(1.0));
-    BranchAndBoundReport { solution, nodes_explored, best_bound, absolute_gap, relative_gap }
+    BranchAndBoundReport {
+        solution, nodes_explored, best_bound, absolute_gap, relative_gap,
+        nodes_pruned_infeasible: statistics.nodes_pruned_infeasible,
+        nodes_pruned_by_bound: statistics.nodes_pruned_by_bound,
+        maximum_depth: statistics.maximum_depth,
+        termination,
+    }
 }
 
 /// Finds the integer-restricted variable furthest from an integer
@@ -505,6 +606,9 @@ mod tests {
         let solver = BranchAndBoundSolver {
             max_nodes: 2,
             integer_tolerance: 1e-6,
+            absolute_gap_tolerance: 0.0,
+            relative_gap_tolerance: 0.0,
+            node_selection: NodeSelection::DepthFirst,
             relaxation_solver: Box::new(RevisedSimplexSolver::default()),
         };
         let report = solver.solve_with_report(&problem).unwrap();
@@ -514,5 +618,43 @@ mod tests {
         assert_eq!(report.best_bound, Some(-21.0));
         assert_eq!(report.absolute_gap, Some(3.0));
         assert!((report.relative_gap.unwrap() - 1.0 / 6.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn best_bound_search_can_stop_at_a_configured_gap() {
+        let problem = dense_problem(
+            vec![-5.0, -4.0],
+            vec![vec![6.0, 4.0], vec![1.0, 2.0]],
+            vec![
+                Bound { lower: None, upper: Some(24.0) },
+                Bound { lower: None, upper: Some(6.0) },
+            ],
+            vec![
+                Bound { lower: Some(0.0), upper: None },
+                Bound { lower: Some(0.0), upper: None },
+            ],
+            vec![true, true],
+        );
+        let solver = BranchAndBoundSolver {
+            absolute_gap_tolerance: 3.0,
+            ..BranchAndBoundSolver::default()
+        };
+        let report = solver.solve_with_report(&problem).unwrap();
+        assert_eq!(report.solution.status, SolveStatus::Optimal);
+        assert_eq!(report.termination, BranchAndBoundTermination::GapSatisfied);
+        assert!(report.absolute_gap.unwrap() <= 3.0);
+        assert!(report.nodes_explored < 5);
+    }
+
+    #[test]
+    fn report_accounts_for_pruning_and_depth() {
+        let problem = dense_problem(
+            vec![1.0], vec![vec![2.0]], vec![Bound::fixed(1.0)],
+            vec![Bound { lower: Some(0.0), upper: Some(10.0) }], vec![true],
+        );
+        let report = BranchAndBoundSolver::default().solve_with_report(&problem).unwrap();
+        assert_eq!(report.termination, BranchAndBoundTermination::Exhausted);
+        assert!(report.nodes_pruned_infeasible >= 2);
+        assert_eq!(report.maximum_depth, 1);
     }
 }

@@ -775,7 +775,7 @@ pub fn solve_lp_interior_point_with_options(
 }
 
 /// Solves `problem` via `nc_optimize::BranchAndBoundSolver` (default
-/// configuration — depth-first, `RevisedSimplexSolver` as the LP
+/// configuration — best-bound, `RevisedSimplexSolver` as the LP
 /// relaxation solver). `problem.is_integer` selects which variables are
 /// integer-restricted; an empty list is treated as "all continuous"
 /// (see `to_domain_problem`), which for this function specifically
@@ -800,6 +800,9 @@ pub fn solve_milp_branch_and_bound_with_options(
     let solver = nc_optimize::BranchAndBoundSolver {
         max_nodes: optimization_limit(options.max_nodes, "max_nodes")?,
         integer_tolerance: options.integer_tolerance,
+        absolute_gap_tolerance: 0.0,
+        relative_gap_tolerance: 0.0,
+        node_selection: nc_optimize::NodeSelection::BestBound,
         relaxation_solver: Box::new(nc_optimize::RevisedSimplexSolver::default()),
     };
     let report = solver.solve_with_report(&domain_problem)?;

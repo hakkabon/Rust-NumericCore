@@ -49,6 +49,7 @@
 //!   unspecified) is handled correctly, not treated as a limitation.
 
 use crate::{Bound, OptimizeError, Problem, SolveStatus, Solution, Solver};
+use std::collections::HashSet;
 
 /// Bounded-variable revised simplex. See this module's docs for the
 /// formulation and scope.
@@ -296,7 +297,23 @@ impl Workspace {
         max_iterations: usize,
         tol: f64,
     ) -> Result<PhaseOutcome, OptimizeError> {
+        let mut seen_states = HashSet::new();
+        let mut bland_mode = false;
         for _ in 0..max_iterations {
+            let state: Vec<(usize, u8)> = self.basis.iter().copied().map(|basic| {
+                let status = match self.nb_status[basic] {
+                    NonbasicBound::AtLower => 0,
+                    NonbasicBound::AtUpper => 1,
+                    NonbasicBound::Free => 2,
+                };
+                (basic, status)
+            }).collect();
+            if !seen_states.insert(state) {
+                // Dantzig's rule is fast, but can cycle on degenerate
+                // models. Once a state repeats, Bland's deterministic
+                // index rule guarantees progress for the remaining phase.
+                bland_mode = true;
+            }
             let cost: Vec<f64> =
                 if phase1 { self.phase1_cost(tol) } else { real_cost_if_phase2.to_vec() };
             let y = self.compute_y(&cost);
@@ -314,7 +331,9 @@ impl Workspace {
                     NonbasicBound::AtUpper => (rc > tol, -1.0, rc),
                     NonbasicBound::Free => (rc.abs() > tol, if rc < 0.0 { 1.0 } else { -1.0 }, rc.abs()),
                 };
-                if eligible && best.map_or(true, |(_, _, best_score)| score > best_score) {
+                if eligible && (best.is_none() || (!bland_mode
+                    && best.is_some_and(|(_, _, best_score)| score > best_score)))
+                {
                     best = Some((j, delta, score));
                 }
             }
@@ -370,7 +389,11 @@ impl Workspace {
                 };
                 let theta_i = ((bound - v) / rate).max(0.0);
 
-                if best_row.map_or(true, |(best_theta, _, _)| theta_i < best_theta) {
+                if best_row.map_or(true, |(best_theta, best_index, _)| {
+                    theta_i < best_theta - tol
+                        || (bland_mode && (theta_i - best_theta).abs() <= tol
+                            && self.basis[i] < self.basis[best_index])
+                }) {
                     best_row = Some((theta_i, i, target));
                 }
             }

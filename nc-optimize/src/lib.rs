@@ -21,7 +21,9 @@ pub mod interior_point;
 pub use interior_point::InteriorPointSolver;
 
 pub mod branch_and_bound;
-pub use branch_and_bound::{BranchAndBoundReport, BranchAndBoundSolver};
+pub use branch_and_bound::{
+    BranchAndBoundReport, BranchAndBoundSolver, BranchAndBoundTermination, NodeSelection,
+};
 
 /// Bound on a variable or constraint. `None` means unbounded in that
 /// direction (`-inf` / `+inf`).

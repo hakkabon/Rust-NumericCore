@@ -171,3 +171,35 @@ best bound, and absolute/relative optimality gaps when an incumbent exists.
 A node-limit or incomplete LP relaxation is reported as `IterationLimit`,
 never collapsed into `Infeasible`. The legacy `Solver::solve` contract remains
 available and projects the report down to its `Solution`.
+
+## Update (Phase 5: deepen the native solver, retain an honest boundary)
+
+The production decision is to continue the native LP/MILP path as an
+embedded, inspectable solver for small and medium structured models, while
+not presenting it as a replacement for mature general-purpose engines.
+That keeps NumericCore self-contained for its intended workloads and makes
+the solver a useful numerical foundation without turning feature parity
+with commercial MILP systems into an implicit promise.
+
+The first deepening step changes branch-and-bound's default traversal from
+depth-first to best-bound, retains depth-first as an explicit policy, adds
+absolute and relative gap stopping, and records the termination reason,
+infeasibility/bound pruning counts, and maximum tree depth. Gap termination
+is deliberately distinguishable from exact tree exhaustion in the native
+report. Revised simplex now detects a repeated basis and switches from
+Dantzig pricing to Bland-style deterministic entering/leaving choices to
+prevent cycling on degenerate relaxations.
+
+The next release boundary should extend the UniFFI records with the new
+search policy, gap tolerances, termination reason, and pruning telemetry.
+The existing FFI shape remains binary-compatible in this change: it adopts
+best-bound internally and continues to expose its Phase 3 node/bound/gap
+certificate. The Swift layer now exposes all configuration and report data
+already present in that v0.8 boundary, so callers no longer need to reach
+into generated bindings.
+
+Before broadening the production claim, the native implementation still
+needs sparse basis factorization with stable updates/refactorization,
+presolve and scaling, warm-started child relaxations, stronger branching,
+and cuts. Until then, large or operationally critical MILPs should use an
+external production solver behind the same compiled-problem boundary.
