@@ -108,7 +108,8 @@ impl From<StatisticalSolveError> for FfiError {
             // consistent with the existing SpMV and LP adapters.
             StatisticalSolveError::Sparse(err) => err.into(),
             other @ (StatisticalSolveError::ObservationLength { .. }
-            | StatisticalSolveError::PenaltyWidth { .. }) => FfiError::DimensionMismatch {
+            | StatisticalSolveError::PenaltyWidth { .. }
+            | StatisticalSolveError::InitialSolutionLength { .. }) => FfiError::DimensionMismatch {
                 message: other.to_string(),
             },
             other => FfiError::SolverError { message: other.to_string() },
@@ -170,6 +171,37 @@ pub struct FfiSparseStatisticalSolveResult {
     pub weighted_residual_sum_of_squares: f64,
     pub penalty_contribution: f64,
     pub objective: f64,
+}
+
+/// Scaling strategy for configurable sparse statistical solves.
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum FfiSparseStatisticalPreconditioner {
+    None,
+    Jacobi,
+}
+
+/// Solver state and convergence settings. `initial_solution` is the previous
+/// coefficient vector in an IRLS loop or regularization path.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiSparseStatisticalSolveOptions {
+    pub max_iterations: u64,
+    pub tolerance: f64,
+    pub initial_solution: Option<Vec<f64>>,
+    pub preconditioner: FfiSparseStatisticalPreconditioner,
+}
+
+fn statistical_options(
+    options: FfiSparseStatisticalSolveOptions,
+) -> Result<nc_iterative::StatisticalSolveOptions, FfiError> {
+    Ok(nc_iterative::StatisticalSolveOptions {
+        max_iterations: statistical_iteration_limit(options.max_iterations)?,
+        tolerance: options.tolerance,
+        initial_solution: options.initial_solution,
+        preconditioner: match options.preconditioner {
+            FfiSparseStatisticalPreconditioner::None => nc_iterative::StatisticalPreconditioner::None,
+            FfiSparseStatisticalPreconditioner::Jacobi => nc_iterative::StatisticalPreconditioner::Jacobi,
+        },
+    })
 }
 
 fn to_csr_f64(matrix: FfiCsrMatrixF64) -> Result<CsrMatrix<f64>, FfiError> {
@@ -327,6 +359,21 @@ pub fn solve_sparse_weighted_least_squares(
     Ok(from_statistical_solve(result))
 }
 
+/// Configurable sparse weighted solve for IRLS and ill-scaled models.
+#[uniffi::export]
+pub fn solve_sparse_weighted_least_squares_with_options(
+    design: FfiCsrMatrixF64,
+    response: Vec<f64>,
+    weights: Vec<f64>,
+    options: FfiSparseStatisticalSolveOptions,
+) -> Result<FfiSparseStatisticalSolveResult, FfiError> {
+    let design = to_csr_f64(design)?;
+    let result = nc_iterative::weighted_least_squares_with_options(
+        &design, &response, &weights, statistical_options(options)?,
+    )?;
+    Ok(from_statistical_solve(result))
+}
+
 /// Solve `min Σᵢ wᵢ(yᵢ − xᵢᵀβ)² + λ‖Pβ‖²` using matrix-free CGLS over
 /// CSR design and penalty operators. `penalty` must have one column per
 /// design coefficient and `penalty_weight` must be finite and positive.
@@ -345,6 +392,25 @@ pub fn solve_sparse_penalized_weighted_least_squares(
     let max_iterations = statistical_iteration_limit(max_iterations)?;
     let result = nc_iterative::penalized_weighted_least_squares(
         &design, &response, &weights, &penalty, penalty_weight, max_iterations, tolerance,
+    )?;
+    Ok(from_statistical_solve(result))
+}
+
+/// Configurable penalized sparse solve with warm-start and preconditioning.
+#[uniffi::export]
+pub fn solve_sparse_penalized_weighted_least_squares_with_options(
+    design: FfiCsrMatrixF64,
+    response: Vec<f64>,
+    weights: Vec<f64>,
+    penalty: FfiCsrMatrixF64,
+    penalty_weight: f64,
+    options: FfiSparseStatisticalSolveOptions,
+) -> Result<FfiSparseStatisticalSolveResult, FfiError> {
+    let design = to_csr_f64(design)?;
+    let penalty = to_csr_f64(penalty)?;
+    let result = nc_iterative::penalized_weighted_least_squares_with_options(
+        &design, &response, &weights, &penalty, penalty_weight,
+        statistical_options(options)?,
     )?;
     Ok(from_statistical_solve(result))
 }
@@ -751,6 +817,25 @@ mod tests {
         assert!((result.weighted_residual_sum_of_squares - 12.0 / 49.0).abs() < 1e-10);
         assert!((result.penalty_contribution - 72.0 / 49.0).abs() < 1e-10);
         assert!((result.objective - 12.0 / 7.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn configurable_sparse_solve_crosses_ffi_with_warm_start() {
+        let design = FfiCsrMatrixF64 {
+            rows: 2, cols: 2, row_ptr: vec![0, 1, 2],
+            col_indices: vec![0, 1], values: vec![1.0, 1.0],
+        };
+        let result = solve_sparse_weighted_least_squares_with_options(
+            design, vec![2.0, 3.0], vec![1.0, 1.0],
+            FfiSparseStatisticalSolveOptions {
+                max_iterations: 10, tolerance: 1e-12,
+                initial_solution: Some(vec![2.0, 3.0]),
+                preconditioner: FfiSparseStatisticalPreconditioner::Jacobi,
+            },
+        ).unwrap();
+        assert!(result.converged);
+        assert_eq!(result.iterations, 0);
+        assert_eq!(result.solution, vec![2.0, 3.0]);
     }
 
     #[test]

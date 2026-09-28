@@ -33,6 +33,13 @@ least-squares optimum intentionally has nonzero data/penalty residual. A
 non-converged iterate is returned with `converged == false`, and must not be
 presented as a fitted model.
 
+The configurable Phase 2 entry points additionally accept a coefficient warm
+start and optional Jacobi scaling. The diagonal
+`diag(XᵀWX + λPᵀP)` is accumulated directly from CSR entries, so
+preconditioning does not materialize normal equations. Preconditioned CGLS
+uses the warm-start residual for both data and penalty blocks. The original
+entry points remain unpreconditioned, zero-start compatibility wrappers.
+
 ## Consequences
 
 - The statistical objective is portable across Rust-supported targets and
@@ -48,3 +55,6 @@ presented as a fitted model.
   sync workflow refreshes bindings and the checksummed XCFramework together.
   That lockstep update is required: source bindings and framework ABI are one
   release unit.
+- Advanced UniFFI entry points carry solver options explicitly. Their warm
+  start is intended for adjacent IRLS iterations and regularization paths;
+  callers still own outer-loop convergence and model-specific diagnostics.
