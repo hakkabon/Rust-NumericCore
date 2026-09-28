@@ -158,3 +158,16 @@ detection. Full workspace green. Wiring `NumericCoreAMPL`'s Swift side
 (a `var x integer;` grammar keyword, `Model`/`CompiledProblem` carrying
 per-variable integrality, `Solve.swift` gaining a `.branchAndBound`
 case) is the follow-up on the Swift-NumericCore side.
+
+## Update (Phase 3: complete LP/MILP integration)
+
+All solver-independent problem dimensions, coefficients, and bounds are now
+validated before an algorithm indexes parallel storage. Configurable UniFFI
+entry points expose simplex, interior-point, and branch-and-bound limits and
+tolerances while retaining the original default-configured functions.
+
+Branch-and-bound additionally returns a search report: nodes explored, global
+best bound, and absolute/relative optimality gaps when an incumbent exists.
+A node-limit or incomplete LP relaxation is reported as `IterationLimit`,
+never collapsed into `Infeasible`. The legacy `Solver::solve` contract remains
+available and projects the report down to its `Solution`.

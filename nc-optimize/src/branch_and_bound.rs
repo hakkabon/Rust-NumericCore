@@ -63,6 +63,17 @@ pub struct BranchAndBoundSolver {
     pub relaxation_solver: Box<dyn Solver>,
 }
 
+/// Search information needed to interpret an early MILP termination.
+#[derive(Debug, Clone)]
+pub struct BranchAndBoundReport {
+    pub solution: Solution,
+    pub nodes_explored: usize,
+    /// Global lower bound for this minimization problem, when known.
+    pub best_bound: Option<f64>,
+    pub absolute_gap: Option<f64>,
+    pub relative_gap: Option<f64>,
+}
+
 impl Default for BranchAndBoundSolver {
     fn default() -> Self {
         Self {
@@ -80,6 +91,8 @@ impl Default for BranchAndBoundSolver {
 #[derive(Clone)]
 struct NodeBounds {
     var_bounds: Vec<Bound>,
+    /// Valid lower bound inherited from this node's parent relaxation.
+    lower_bound: Option<f64>,
 }
 
 impl NodeBounds {
@@ -90,7 +103,7 @@ impl NodeBounds {
             lower: tighter_lower(current.lower, lower),
             upper: tighter_upper(current.upper, upper),
         };
-        Self { var_bounds }
+        Self { var_bounds, lower_bound: self.lower_bound }
     }
 }
 
@@ -116,6 +129,16 @@ impl Solver for BranchAndBoundSolver {
     }
 
     fn solve(&self, problem: &Problem) -> Result<Solution, OptimizeError> {
+        Ok(self.solve_with_report(problem)?.solution)
+    }
+}
+
+impl BranchAndBoundSolver {
+    pub fn solve_with_report(
+        &self,
+        problem: &Problem,
+    ) -> Result<BranchAndBoundReport, OptimizeError> {
+        problem.validate()?;
         if self.max_nodes == 0
             || !self.integer_tolerance.is_finite()
             || self.integer_tolerance <= 0.0
@@ -124,33 +147,42 @@ impl Solver for BranchAndBoundSolver {
                 "branch-and-bound requires max_nodes > 0 and finite integer_tolerance > 0",
             ));
         }
-        if problem.is_integer.len() != problem.objective.len() {
-            return Err(OptimizeError::NotImplemented(
-                "branch-and-bound: is_integer length must match objective length",
-            ));
-        }
         if !problem.is_integer.iter().any(|&b| b) {
             // No integer variables at all - this is just an LP. Solve
             // it directly rather than paying for a branch-and-bound
             // tree with nothing to branch on.
-            return self.relaxation_solver.solve(problem);
+            let solution = self.relaxation_solver.solve(problem)?;
+            let bound = (solution.status == SolveStatus::Optimal).then_some(solution.objective_value);
+            return Ok(report(solution, 1, bound));
         }
 
-        let mut stack = vec![NodeBounds { var_bounds: problem.var_bounds.clone() }];
+        let mut stack = vec![NodeBounds {
+            var_bounds: problem.var_bounds.clone(), lower_bound: None,
+        }];
         let mut incumbent: Option<Solution> = None;
         let mut nodes_explored = 0usize;
+        let mut search_incomplete = false;
+        let mut incomplete_bound: Option<f64> = None;
 
         while let Some(node) = stack.pop() {
-            nodes_explored += 1;
-            if nodes_explored > self.max_nodes {
-                return Ok(match incumbent {
+            if nodes_explored == self.max_nodes {
+                let best_bound = open_best_bound(&stack, node.lower_bound);
+                let solution = match incumbent {
                     Some(sol) => Solution { status: SolveStatus::IterationLimit, ..sol },
                     None => Solution {
                         variable_values: vec![],
                         objective_value: 0.0,
                         status: SolveStatus::IterationLimit,
                     },
-                });
+                };
+                return Ok(report(solution, nodes_explored, best_bound));
+            }
+            nodes_explored += 1;
+
+            if node.var_bounds.iter().any(|bound| {
+                matches!((bound.lower, bound.upper), (Some(lower), Some(upper)) if lower > upper)
+            }) {
+                continue;
             }
 
             let node_problem = Problem {
@@ -176,13 +208,19 @@ impl Solver for BranchAndBoundSolver {
                     // Deeper in the tree, added bounds normally rule
                     // this out; if it still happens, treat it the same
                     // way.
-                    return Ok(relaxed);
+                    return Ok(report(relaxed, nodes_explored, None));
                 }
                 SolveStatus::IterationLimit => {
                     // The relaxation itself didn't converge - can't
                     // trust its bound for pruning. Skip this node
                     // rather than either wrongly pruning or wrongly
                     // accepting it as a bound.
+                    search_incomplete = true;
+                    incomplete_bound = match (incomplete_bound, node.lower_bound) {
+                        (Some(current), Some(candidate)) => Some(current.min(candidate)),
+                        (None, candidate) => candidate,
+                        (current, None) => current,
+                    };
                     continue;
                 }
                 SolveStatus::Optimal => {}
@@ -208,17 +246,48 @@ impl Solver for BranchAndBoundSolver {
                 Some((var_index, value)) => {
                     let floor_value = value.floor();
                     let ceil_value = value.ceil();
-                    stack.push(node.tightened(var_index, None, Some(floor_value)));
-                    stack.push(node.tightened(var_index, Some(ceil_value), None));
+                    let mut upper = node.tightened(var_index, None, Some(floor_value));
+                    let mut lower = node.tightened(var_index, Some(ceil_value), None);
+                    upper.lower_bound = Some(relaxed.objective_value);
+                    lower.lower_bound = Some(relaxed.objective_value);
+                    stack.push(upper);
+                    stack.push(lower);
                 }
             }
         }
 
         match incumbent {
-            Some(sol) => Ok(sol),
-            None => Ok(Solution { variable_values: vec![], objective_value: 0.0, status: SolveStatus::Infeasible }),
+            Some(sol) if search_incomplete => {
+                let solution = Solution { status: SolveStatus::IterationLimit, ..sol };
+                Ok(report(solution, nodes_explored, incomplete_bound))
+            }
+            Some(sol) => {
+                let bound = Some(sol.objective_value);
+                Ok(report(sol, nodes_explored, bound))
+            }
+            None if search_incomplete => Ok(report(Solution {
+                variable_values: vec![], objective_value: 0.0,
+                status: SolveStatus::IterationLimit,
+            }, nodes_explored, None)),
+            None => Ok(report(Solution {
+                variable_values: vec![], objective_value: 0.0,
+                status: SolveStatus::Infeasible,
+            }, nodes_explored, None)),
         }
     }
+}
+
+fn open_best_bound(stack: &[NodeBounds], current: Option<f64>) -> Option<f64> {
+    stack.iter().filter_map(|node| node.lower_bound).chain(current).reduce(f64::min)
+}
+
+fn report(solution: Solution, nodes_explored: usize, best_bound: Option<f64>) -> BranchAndBoundReport {
+    let has_incumbent = !solution.variable_values.is_empty();
+    let absolute_gap = if has_incumbent {
+        best_bound.map(|bound| (solution.objective_value - bound).max(0.0))
+    } else { None };
+    let relative_gap = absolute_gap.map(|gap| gap / solution.objective_value.abs().max(1.0));
+    BranchAndBoundReport { solution, nodes_explored, best_bound, absolute_gap, relative_gap }
 }
 
 /// Finds the integer-restricted variable furthest from an integer
@@ -415,6 +484,35 @@ mod tests {
         );
         problem.is_integer = vec![true, true]; // wrong length on purpose
         let result = BranchAndBoundSolver::default().solve(&problem);
-        assert!(matches!(result, Err(OptimizeError::NotImplemented(_))));
+        assert!(matches!(result, Err(OptimizeError::InvalidProblem(_))));
+    }
+
+    #[test]
+    fn node_limit_reports_incumbent_bound_and_gap() {
+        let problem = dense_problem(
+            vec![-5.0, -4.0],
+            vec![vec![6.0, 4.0], vec![1.0, 2.0]],
+            vec![
+                Bound { lower: None, upper: Some(24.0) },
+                Bound { lower: None, upper: Some(6.0) },
+            ],
+            vec![
+                Bound { lower: Some(0.0), upper: None },
+                Bound { lower: Some(0.0), upper: None },
+            ],
+            vec![true, true],
+        );
+        let solver = BranchAndBoundSolver {
+            max_nodes: 2,
+            integer_tolerance: 1e-6,
+            relaxation_solver: Box::new(RevisedSimplexSolver::default()),
+        };
+        let report = solver.solve_with_report(&problem).unwrap();
+        assert_eq!(report.solution.status, SolveStatus::IterationLimit);
+        assert_eq!(report.nodes_explored, 2);
+        assert!(!report.solution.variable_values.is_empty());
+        assert_eq!(report.best_bound, Some(-21.0));
+        assert_eq!(report.absolute_gap, Some(3.0));
+        assert!((report.relative_gap.unwrap() - 1.0 / 6.0).abs() < 1e-12);
     }
 }

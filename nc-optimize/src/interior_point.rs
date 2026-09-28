@@ -94,6 +94,7 @@ impl Solver for InteriorPointSolver {
     }
 
     fn solve(&self, problem: &Problem) -> Result<Solution, OptimizeError> {
+        problem.validate()?;
         if self.max_iterations == 0
             || !self.tolerance.is_finite()
             || self.tolerance <= 0.0

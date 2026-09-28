@@ -474,6 +474,43 @@ pub struct FfiSolution {
     pub status: FfiSolveStatus,
 }
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiSimplexOptions {
+    pub max_iterations: u64,
+    pub tolerance: f64,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiInteriorPointOptions {
+    pub max_iterations: u64,
+    pub tolerance: f64,
+    pub sigma: f64,
+    pub big_bound: f64,
+    pub step_fraction: f64,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiBranchAndBoundOptions {
+    pub max_nodes: u64,
+    pub integer_tolerance: f64,
+}
+
+/// MILP result plus the search certificate available at termination.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiMilpSolveResult {
+    pub solution: FfiSolution,
+    pub nodes_explored: u64,
+    pub best_bound: Option<f64>,
+    pub absolute_gap: Option<f64>,
+    pub relative_gap: Option<f64>,
+}
+
+fn optimization_limit(value: u64, name: &'static str) -> Result<usize, FfiError> {
+    usize::try_from(value).map_err(|_| FfiError::SolverError {
+        message: format!("{name} does not fit this platform"),
+    })
+}
+
 fn to_domain_problem(problem: FfiProblem) -> Result<nc_optimize::Problem, FfiError> {
     let variable_count = problem.objective.len();
     let constraints = CsrMatrix::new(
@@ -533,6 +570,20 @@ pub fn solve_lp_simplex(problem: FfiProblem) -> Result<FfiSolution, FfiError> {
     Ok(from_domain_solution(solution))
 }
 
+#[uniffi::export]
+pub fn solve_lp_simplex_with_options(
+    problem: FfiProblem,
+    options: FfiSimplexOptions,
+) -> Result<FfiSolution, FfiError> {
+    use nc_optimize::Solver;
+    let domain_problem = to_domain_problem(problem)?;
+    let solver = nc_optimize::RevisedSimplexSolver {
+        max_iterations: optimization_limit(options.max_iterations, "max_iterations")?,
+        tolerance: options.tolerance,
+    };
+    Ok(from_domain_solution(solver.solve(&domain_problem)?))
+}
+
 /// Solves `problem` via `nc_optimize::InteriorPointSolver` (default
 /// configuration). See that solver's module docs for its two scope
 /// boundaries: it rejects equality constraints/fixed variables outright
@@ -544,6 +595,23 @@ pub fn solve_lp_interior_point(problem: FfiProblem) -> Result<FfiSolution, FfiEr
     let domain_problem = to_domain_problem(problem)?;
     let solution = nc_optimize::InteriorPointSolver::default().solve(&domain_problem)?;
     Ok(from_domain_solution(solution))
+}
+
+#[uniffi::export]
+pub fn solve_lp_interior_point_with_options(
+    problem: FfiProblem,
+    options: FfiInteriorPointOptions,
+) -> Result<FfiSolution, FfiError> {
+    use nc_optimize::Solver;
+    let domain_problem = to_domain_problem(problem)?;
+    let solver = nc_optimize::InteriorPointSolver {
+        max_iterations: optimization_limit(options.max_iterations, "max_iterations")?,
+        tolerance: options.tolerance,
+        sigma: options.sigma,
+        big_bound: options.big_bound,
+        step_fraction: options.step_fraction,
+    };
+    Ok(from_domain_solution(solver.solve(&domain_problem)?))
 }
 
 /// Solves `problem` via `nc_optimize::BranchAndBoundSolver` (default
@@ -561,6 +629,27 @@ pub fn solve_milp_branch_and_bound(problem: FfiProblem) -> Result<FfiSolution, F
     let domain_problem = to_domain_problem(problem)?;
     let solution = nc_optimize::BranchAndBoundSolver::default().solve(&domain_problem)?;
     Ok(from_domain_solution(solution))
+}
+
+#[uniffi::export]
+pub fn solve_milp_branch_and_bound_with_options(
+    problem: FfiProblem,
+    options: FfiBranchAndBoundOptions,
+) -> Result<FfiMilpSolveResult, FfiError> {
+    let domain_problem = to_domain_problem(problem)?;
+    let solver = nc_optimize::BranchAndBoundSolver {
+        max_nodes: optimization_limit(options.max_nodes, "max_nodes")?,
+        integer_tolerance: options.integer_tolerance,
+        relaxation_solver: Box::new(nc_optimize::RevisedSimplexSolver::default()),
+    };
+    let report = solver.solve_with_report(&domain_problem)?;
+    Ok(FfiMilpSolveResult {
+        solution: from_domain_solution(report.solution),
+        nodes_explored: report.nodes_explored as u64,
+        best_bound: report.best_bound,
+        absolute_gap: report.absolute_gap,
+        relative_gap: report.relative_gap,
+    })
 }
 
 /// A reference-counted `f64` vector buffer living entirely in Rust —
@@ -1037,6 +1126,30 @@ mod tests {
         };
         let solution = solve_milp_branch_and_bound(problem).unwrap();
         assert_eq!(solution.status, FfiSolveStatus::Infeasible);
+    }
+
+    #[test]
+    fn configurable_milp_report_crosses_the_ffi_boundary() {
+        let problem = FfiProblem {
+            objective: vec![-2.0],
+            constraints: FfiCsrMatrixF64 {
+                rows: 0, cols: 1, row_ptr: vec![0],
+                col_indices: vec![], values: vec![],
+            },
+            row_bounds: vec![],
+            var_bounds: vec![FfiBound { lower: Some(0.0), upper: Some(3.0) }],
+            is_integer: vec![true],
+        };
+        let report = solve_milp_branch_and_bound_with_options(
+            problem,
+            FfiBranchAndBoundOptions { max_nodes: 10, integer_tolerance: 1e-8 },
+        ).unwrap();
+        assert_eq!(report.solution.status, FfiSolveStatus::Optimal);
+        assert_eq!(report.solution.variable_values, vec![3.0]);
+        assert_eq!(report.nodes_explored, 1);
+        assert_eq!(report.best_bound, Some(-6.0));
+        assert_eq!(report.absolute_gap, Some(0.0));
+        assert_eq!(report.relative_gap, Some(0.0));
     }
 
     #[test]

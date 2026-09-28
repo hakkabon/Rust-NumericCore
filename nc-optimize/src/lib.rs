@@ -6,13 +6,10 @@
 //! format) sits between them, so any solver can consume any presolved
 //! model without knowing anything about modeling-language syntax.
 //!
-//! v1 scope: the `Problem` data model and the `Solver` trait exist now;
-//! only a stub solver is implemented today. Real solving is sequenced as
-//! LP → MILP → NLP, each a substantial, separately-scoped effort — see
-//! `docs/decisions/0004-optimize-sequencing.md`. Don't be surprised that
-//! `StubSolver` is the only thing that runs right now; that's intentional
-//! so the modeling-language → presolve → solver-interface pipeline can be
-//! wired and tested end to end before any real solving exists.
+//! The `Problem`/`Solver` seam is consumed by revised-simplex and
+//! interior-point LP solvers plus branch-and-bound MILP. NLP remains a
+//! separately scoped future layer; see
+//! `docs/decisions/0004-optimize-sequencing.md`.
 
 use nc_sparse::CsrMatrix;
 use thiserror::Error;
@@ -24,7 +21,7 @@ pub mod interior_point;
 pub use interior_point::InteriorPointSolver;
 
 pub mod branch_and_bound;
-pub use branch_and_bound::BranchAndBoundSolver;
+pub use branch_and_bound::{BranchAndBoundReport, BranchAndBoundSolver};
 
 /// Bound on a variable or constraint. `None` means unbounded in that
 /// direction (`-inf` / `+inf`).
@@ -75,6 +72,41 @@ pub struct Problem {
     /// this is exactly the "breaking addition" that ADR anticipated
     /// MILP would eventually need.
     pub is_integer: Vec<bool>,
+}
+
+impl Problem {
+    /// Validate the solver-independent LP/MILP handoff before any algorithm
+    /// indexes its parallel vectors or relies on finite arithmetic.
+    pub fn validate(&self) -> Result<(), OptimizeError> {
+        let variables = self.objective.len();
+        if self.constraints.cols() != variables
+            || self.var_bounds.len() != variables
+            || self.is_integer.len() != variables
+            || self.row_bounds.len() != self.constraints.rows()
+        {
+            return Err(OptimizeError::InvalidProblem(
+                "objective, matrix, bounds, and integrality dimensions do not agree".to_owned(),
+            ));
+        }
+        if !self.objective.iter().all(|value| value.is_finite())
+            || !self.constraints.iter_entries().all(|(_, _, value)| value.is_finite())
+        {
+            return Err(OptimizeError::InvalidProblem(
+                "objective and constraint coefficients must be finite".to_owned(),
+            ));
+        }
+        for bound in self.row_bounds.iter().chain(&self.var_bounds) {
+            if bound.lower.is_some_and(|value| !value.is_finite())
+                || bound.upper.is_some_and(|value| !value.is_finite())
+                || matches!((bound.lower, bound.upper), (Some(lower), Some(upper)) if lower > upper)
+            {
+                return Err(OptimizeError::InvalidProblem(
+                    "bounds must be finite when present and lower must not exceed upper".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +236,9 @@ pub enum OptimizeError {
 
     #[error("invalid solver configuration: {0}")]
     InvalidConfiguration(&'static str),
+
+    #[error("invalid optimization problem: {0}")]
+    InvalidProblem(String),
 
     #[error(transparent)]
     Sparse(#[from] nc_sparse::SparseError),
