@@ -6,10 +6,10 @@
 //! format) sits between them, so any solver can consume any presolved
 //! model without knowing anything about modeling-language syntax.
 //!
-//! The `Problem`/`Solver` seam is consumed by revised-simplex and
-//! interior-point LP solvers plus branch-and-bound MILP. NLP remains a
-//! separately scoped future layer; see
-//! `docs/decisions/0004-optimize-sequencing.md`.
+//! The linear `Problem`/`Solver` seam is consumed by revised-simplex,
+//! interior-point, and branch-and-bound. Smooth nonlinear objectives use
+//! closure-based L-BFGS and Levenberg-Marquardt APIs because their callback
+//! structure is materially different from a coefficient-matrix problem.
 
 use nc_sparse::CsrMatrix;
 use thiserror::Error;
@@ -23,6 +23,14 @@ pub use interior_point::InteriorPointSolver;
 pub mod branch_and_bound;
 pub use branch_and_bound::{
     BranchAndBoundReport, BranchAndBoundSolver, BranchAndBoundTermination, NodeSelection,
+};
+
+pub mod lbfgs;
+pub use lbfgs::{minimize_lbfgs, LbfgsOptions, LbfgsResult, NonlinearTermination};
+
+pub mod nonlinear_least_squares;
+pub use nonlinear_least_squares::{
+    nonlinear_least_squares, NonlinearLeastSquaresOptions, NonlinearLeastSquaresResult,
 };
 
 /// Bound on a variable or constraint. `None` means unbounded in that

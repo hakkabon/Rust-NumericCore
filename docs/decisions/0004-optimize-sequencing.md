@@ -203,3 +203,21 @@ needs sparse basis factorization with stable updates/refactorization,
 presolve and scaling, warm-started child relaxations, stronger branching,
 and cuts. Until then, large or operationally critical MILPs should use an
 external production solver behind the same compiled-problem boundary.
+
+## Update (Phase 6: nonlinear least squares and L-BFGS)
+
+The first nonlinear layer is intentionally programmatic rather than an AMPL
+grammar extension. `minimize_lbfgs` accepts a smooth objective and analytic
+gradient, uses the limited-memory two-loop recursion, and globalizes each
+iteration with Armijo backtracking. `nonlinear_least_squares` accepts residuals
+and an analytic Jacobian and uses damped Gauss-Newton/Levenberg-Marquardt
+steps. Both validate callback dimensions and finite arithmetic and return
+iteration/evaluation counts plus explicit convergence or failure reasons.
+
+These callback APIs do not cross UniFFI: arbitrary Swift closures are not a
+sound release-binary interface. Swift-NumericCore therefore provides the same
+contract natively in `NumericCoreOptimization`. A later expression graph,
+automatic-differentiation representation, or reverse-communication protocol
+can become the shared FFI boundary when constrained nonlinear optimization
+and nonlinear AMPL syntax are designed. Convex quadratic programming remains
+deferred as requested rather than being introduced indirectly here.
