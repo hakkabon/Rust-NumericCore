@@ -54,7 +54,7 @@
 //! established "don't build ahead of need" principle — see ADR 0006's
 //! update.
 
-use nc_iterative::StatisticalSolveError;
+use nc_iterative::{IterativeSolveError, StatisticalSolveError};
 use nc_kernels_generic as kernels;
 use nc_sparse::CsrMatrix;
 use std::sync::{Arc, Mutex};
@@ -117,6 +117,20 @@ impl From<StatisticalSolveError> for FfiError {
     }
 }
 
+impl From<IterativeSolveError> for FfiError {
+    fn from(err: IterativeSolveError) -> Self {
+        match err {
+            IterativeSolveError::Sparse(err) => err.into(),
+            other @ (IterativeSolveError::NonSquare { .. }
+                | IterativeSolveError::RightHandSideLength { .. }
+                | IterativeSolveError::InitialSolutionLength { .. }) => {
+                FfiError::DimensionMismatch { message: other.to_string() }
+            }
+            other => FfiError::SolverError { message: other.to_string() },
+        }
+    }
+}
+
 /// A dense `f64` matrix crossing the FFI boundary, column-major
 /// (matching `Matrix<T>`'s Swift-side layout — ADR 0001 — so no
 /// reordering happens in either direction).
@@ -154,6 +168,88 @@ pub struct FfiCsrMatrixF32 {
     pub row_ptr: Vec<u32>,
     pub col_indices: Vec<u32>,
     pub values: Vec<f32>,
+}
+
+/// Coordinate-form sparse matrix for incremental construction.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiCooMatrixF64 {
+    pub rows: u32,
+    pub cols: u32,
+    pub row_indices: Vec<u32>,
+    pub col_indices: Vec<u32>,
+    pub values: Vec<f64>,
+}
+
+fn from_csr_f64(matrix: CsrMatrix<f64>) -> FfiCsrMatrixF64 {
+    let rows = matrix.rows() as u32;
+    let cols = matrix.cols() as u32;
+    let entries: Vec<_> = matrix.iter_entries().collect();
+    let mut row_ptr = vec![0u32; rows as usize + 1];
+    let mut col_indices = Vec::with_capacity(entries.len());
+    let mut values = Vec::with_capacity(entries.len());
+    for (row, column, value) in entries {
+        row_ptr[row + 1] += 1;
+        col_indices.push(column as u32);
+        values.push(value);
+    }
+    for row in 0..rows as usize { row_ptr[row + 1] += row_ptr[row]; }
+    FfiCsrMatrixF64 { rows, cols, row_ptr, col_indices, values }
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum FfiLinearPreconditioner {
+    None,
+    Jacobi,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiLinearSolveOptions {
+    pub max_iterations: u64,
+    pub tolerance: f64,
+    pub initial_solution: Option<Vec<f64>>,
+    pub preconditioner: FfiLinearPreconditioner,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiIterativeTermination {
+    Converged,
+    IterationLimit,
+    Breakdown,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiLinearSolveResult {
+    pub solution: Vec<f64>,
+    pub iterations: u64,
+    pub residual_norm: f64,
+    pub relative_residual: f64,
+    pub termination: FfiIterativeTermination,
+}
+
+fn linear_options(options: FfiLinearSolveOptions) -> Result<nc_iterative::LinearSolveOptions, FfiError> {
+    Ok(nc_iterative::LinearSolveOptions {
+        max_iterations: statistical_iteration_limit(options.max_iterations)?,
+        tolerance: options.tolerance,
+        initial_solution: options.initial_solution,
+        preconditioner: match options.preconditioner {
+            FfiLinearPreconditioner::None => nc_iterative::LinearPreconditioner::None,
+            FfiLinearPreconditioner::Jacobi => nc_iterative::LinearPreconditioner::Jacobi,
+        },
+    })
+}
+
+fn from_linear_solve(result: nc_iterative::LinearSolveReport) -> FfiLinearSolveResult {
+    FfiLinearSolveResult {
+        solution: result.solution,
+        iterations: result.iterations as u64,
+        residual_norm: result.residual_norm,
+        relative_residual: result.relative_residual,
+        termination: match result.termination {
+            nc_iterative::IterativeTermination::Converged => FfiIterativeTermination::Converged,
+            nc_iterative::IterativeTermination::IterationLimit => FfiIterativeTermination::IterationLimit,
+            nc_iterative::IterativeTermination::Breakdown => FfiIterativeTermination::Breakdown,
+        },
+    }
 }
 
 /// Observable outcome of a sparse weighted or penalized least-squares solve.
@@ -324,6 +420,70 @@ pub fn norm2_f32(x: Vec<f32>) -> f32 {
 pub fn spmv_f64(matrix: FfiCsrMatrixF64, x: Vec<f64>) -> Result<Vec<f64>, FfiError> {
     let csr = to_csr_f64(matrix)?;
     Ok(csr.spmv(&x)?)
+}
+
+/// Canonicalize coordinate entries into sorted, duplicate-coalesced CSR.
+#[uniffi::export]
+pub fn coo_to_csr_f64(matrix: FfiCooMatrixF64) -> Result<FfiCsrMatrixF64, FfiError> {
+    if matrix.row_indices.len() != matrix.col_indices.len()
+        || matrix.row_indices.len() != matrix.values.len()
+    {
+        return Err(FfiError::DimensionMismatch {
+            message: "COO row, column, and value arrays must have equal length".to_owned(),
+        });
+    }
+    let mut coo = nc_sparse::CooMatrix::with_capacity(
+        matrix.rows as usize, matrix.cols as usize, matrix.values.len(),
+    );
+    for ((row, column), value) in matrix.row_indices.into_iter()
+        .zip(matrix.col_indices).zip(matrix.values)
+    {
+        coo.push(row as usize, column as usize, value)?;
+    }
+    Ok(from_csr_f64(coo.to_csr()?))
+}
+
+#[uniffi::export]
+pub fn transpose_csr_f64(matrix: FfiCsrMatrixF64) -> Result<FfiCsrMatrixF64, FfiError> {
+    Ok(from_csr_f64(to_csr_f64(matrix)?.transpose()?))
+}
+
+#[uniffi::export]
+pub fn solve_sparse_conjugate_gradient(
+    matrix: FfiCsrMatrixF64,
+    rhs: Vec<f64>,
+    options: FfiLinearSolveOptions,
+) -> Result<FfiLinearSolveResult, FfiError> {
+    let result = nc_iterative::conjugate_gradient_with_options(
+        &to_csr_f64(matrix)?, &rhs, linear_options(options)?,
+    )?;
+    Ok(from_linear_solve(result))
+}
+
+#[uniffi::export]
+pub fn solve_sparse_bicgstab(
+    matrix: FfiCsrMatrixF64,
+    rhs: Vec<f64>,
+    options: FfiLinearSolveOptions,
+) -> Result<FfiLinearSolveResult, FfiError> {
+    let result = nc_iterative::bicgstab(
+        &to_csr_f64(matrix)?, &rhs, linear_options(options)?,
+    )?;
+    Ok(from_linear_solve(result))
+}
+
+#[uniffi::export]
+pub fn solve_sparse_gmres(
+    matrix: FfiCsrMatrixF64,
+    rhs: Vec<f64>,
+    options: FfiLinearSolveOptions,
+    restart: u64,
+) -> Result<FfiLinearSolveResult, FfiError> {
+    let result = nc_iterative::gmres(
+        &to_csr_f64(matrix)?, &rhs, linear_options(options)?,
+        statistical_iteration_limit(restart)?,
+    )?;
+    Ok(from_linear_solve(result))
 }
 
 /// The `f32` counterpart of `spmv_f64`.
@@ -808,6 +968,34 @@ mod tests {
         };
         let result = spmv_f64(matrix, vec![1.0, 1.0, 1.0]).unwrap();
         assert_eq!(result, vec![3.0, 3.0]);
+    }
+
+    #[test]
+    fn sparse_assembly_transpose_and_bicgstab_cross_ffi() {
+        let csr = coo_to_csr_f64(FfiCooMatrixF64 {
+            rows: 2, cols: 2,
+            row_indices: vec![1, 0, 1, 0],
+            col_indices: vec![0, 1, 1, 0],
+            values: vec![2.0, 1.0, 3.0, 4.0],
+        }).unwrap();
+        let transposed = transpose_csr_f64(csr.clone()).unwrap();
+        assert_eq!(spmv_f64(transposed, vec![1.0, 1.0]).unwrap(), vec![6.0, 4.0]);
+        let solved = solve_sparse_bicgstab(
+            csr.clone(), vec![6.0, 8.0], FfiLinearSolveOptions {
+                max_iterations: 20, tolerance: 1e-12, initial_solution: None,
+                preconditioner: FfiLinearPreconditioner::Jacobi,
+            },
+        ).unwrap();
+        assert_eq!(solved.termination, FfiIterativeTermination::Converged);
+        assert!((solved.solution[0] - 1.0).abs() < 1e-10);
+        assert!((solved.solution[1] - 2.0).abs() < 1e-10);
+        let gmres = solve_sparse_gmres(
+            csr, vec![6.0, 8.0], FfiLinearSolveOptions {
+                max_iterations: 20, tolerance: 1e-12, initial_solution: None,
+                preconditioner: FfiLinearPreconditioner::Jacobi,
+            }, 2,
+        ).unwrap();
+        assert_eq!(gmres.termination, FfiIterativeTermination::Converged);
     }
 
     #[test]

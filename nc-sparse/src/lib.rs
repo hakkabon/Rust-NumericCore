@@ -13,6 +13,7 @@
 //!   handoff point between the modeling language and the solver.
 
 use thiserror::Error;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Error)]
 pub enum SparseError {
@@ -37,8 +38,69 @@ pub enum SparseError {
     #[error("column index {index} out of bounds for {cols} columns")]
     ColumnOutOfBounds { index: usize, cols: usize },
 
+    #[error("row index {index} out of bounds for {rows} rows")]
+    RowOutOfBounds { index: usize, rows: usize },
+
     #[error("dimension mismatch: matrix is {rows}x{cols}, vector has length {vec_len}")]
     DimensionMismatch { rows: usize, cols: usize, vec_len: usize },
+}
+
+/// Coordinate-form sparse matrix for incremental assembly.
+#[derive(Debug, Clone)]
+pub struct CooMatrix<T> {
+    rows: usize,
+    cols: usize,
+    entries: Vec<(usize, usize, T)>,
+}
+
+impl<T> CooMatrix<T> {
+    pub fn new(rows: usize, cols: usize) -> Self {
+        Self { rows, cols, entries: Vec::new() }
+    }
+
+    pub fn with_capacity(rows: usize, cols: usize, capacity: usize) -> Self {
+        Self { rows, cols, entries: Vec::with_capacity(capacity) }
+    }
+
+    pub fn push(&mut self, row: usize, col: usize, value: T) -> Result<(), SparseError> {
+        if row >= self.rows { return Err(SparseError::RowOutOfBounds { index: row, rows: self.rows }); }
+        if col >= self.cols { return Err(SparseError::ColumnOutOfBounds { index: col, cols: self.cols }); }
+        self.entries.push((row, col, value));
+        Ok(())
+    }
+
+    pub fn entries(&self) -> &[(usize, usize, T)] { &self.entries }
+}
+
+impl<T> CooMatrix<T>
+where
+    T: Copy + Default + PartialEq + std::ops::AddAssign + std::ops::Add<Output = T>
+        + std::ops::Mul<Output = T>,
+{
+    /// Convert to canonical CSR: rows/columns are sorted, duplicate
+    /// coordinates are summed, and entries that cancel to zero are removed.
+    pub fn to_csr(&self) -> Result<CsrMatrix<T>, SparseError> {
+        let mut rows = vec![BTreeMap::<usize, T>::new(); self.rows];
+        for &(row, col, value) in &self.entries {
+            if row >= self.rows { return Err(SparseError::RowOutOfBounds { index: row, rows: self.rows }); }
+            if col >= self.cols { return Err(SparseError::ColumnOutOfBounds { index: col, cols: self.cols }); }
+            *rows[row].entry(col).or_default() += value;
+        }
+        let mut row_ptr = Vec::with_capacity(self.rows + 1);
+        let mut col_indices = Vec::new();
+        let mut values = Vec::new();
+        row_ptr.push(0);
+        for row in rows {
+            for (column, value) in row {
+                if value != T::default() {
+                    col_indices.push(column);
+                    values.push(value);
+                }
+            }
+            row_ptr.push(values.len());
+        }
+        CsrMatrix::new(self.rows, self.cols, row_ptr, col_indices, values)
+    }
 }
 
 /// Compressed Sparse Row matrix.
@@ -170,6 +232,27 @@ impl<T: Copy + Default + std::ops::Add<Output = T> + std::ops::Mul<Output = T>> 
         }
         Ok(y)
     }
+
+    /// Materialize the transpose in canonical CSR form in O(rows + cols + nnz).
+    pub fn transpose(&self) -> Result<CsrMatrix<T>, SparseError> {
+        let mut counts = vec![0usize; self.cols];
+        for &column in &self.col_indices { counts[column] += 1; }
+        let mut row_ptr = vec![0usize; self.cols + 1];
+        for row in 0..self.cols { row_ptr[row + 1] = row_ptr[row] + counts[row]; }
+        let mut next = row_ptr[..self.cols].to_vec();
+        let mut col_indices = vec![0usize; self.values.len()];
+        let mut values = vec![T::default(); self.values.len()];
+        for row in 0..self.rows {
+            for index in self.row_ptr[row]..self.row_ptr[row + 1] {
+                let target_row = self.col_indices[index];
+                let target = next[target_row];
+                col_indices[target] = row;
+                values[target] = self.values[index];
+                next[target_row] += 1;
+            }
+        }
+        CsrMatrix::new(self.cols, self.rows, row_ptr, col_indices, values)
+    }
 }
 
 #[cfg(test)]
@@ -232,5 +315,27 @@ mod tests {
         let m = sample(); // [[1, 0, 2], [0, 3, 0]]
         let entries: Vec<_> = m.iter_entries().collect();
         assert_eq!(entries, vec![(0, 0, 1.0), (0, 2, 2.0), (1, 1, 3.0)]);
+    }
+
+    #[test]
+    fn coo_to_csr_sorts_coalesces_and_drops_cancelled_entries() {
+        let mut coo = CooMatrix::new(2, 3);
+        coo.push(1, 2, 4.0).unwrap();
+        coo.push(0, 1, 3.0).unwrap();
+        coo.push(1, 0, 2.0).unwrap();
+        coo.push(0, 1, -3.0).unwrap();
+        coo.push(1, 2, 1.0).unwrap();
+        let csr = coo.to_csr().unwrap();
+        assert_eq!(csr.iter_entries().collect::<Vec<_>>(), vec![(1, 0, 2.0), (1, 2, 5.0)]);
+    }
+
+    #[test]
+    fn csr_transpose_round_trips_and_matches_transpose_product() {
+        let matrix = sample();
+        let transposed = matrix.transpose().unwrap();
+        assert_eq!(transposed.rows(), 3);
+        assert_eq!(transposed.cols(), 2);
+        assert_eq!(transposed.spmv(&[4.0, 5.0]).unwrap(), matrix.transpose_spmv(&[4.0, 5.0]).unwrap());
+        assert_eq!(transposed.transpose().unwrap().iter_entries().collect::<Vec<_>>(), matrix.iter_entries().collect::<Vec<_>>());
     }
 }

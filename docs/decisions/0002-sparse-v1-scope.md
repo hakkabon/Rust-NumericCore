@@ -66,3 +66,17 @@ measured least-squares consumer requires.
   no current consumer needs CSC at all. Building all three now is
   exactly the kind of speculative generality this project's design
   principles try to avoid.
+
+## Update — Phase 4 sparse assembly and iterative depth
+
+Incremental construction is now a concrete workload, so `CooMatrix` provides
+validated coordinate insertion and canonical COO→CSR conversion. Conversion
+sorts columns, sums duplicate coordinates, and removes entries that cancel to
+zero. CSR can also materialize its transpose in O(rows + cols + nnz). CSC
+remains deferred because no sparse direct factorization consumes it yet.
+
+`nc-iterative` now complements CGLS with configurable warm-started,
+Jacobi-preconditioned CG, BiCGSTAB, and restarted GMRES. Every method validates
+shape and finite inputs and distinguishes convergence, iteration exhaustion,
+and numerical breakdown. These operations and sparse conversions are exported
+through UniFFI as one coordinated release boundary.
