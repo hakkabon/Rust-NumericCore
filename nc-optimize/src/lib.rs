@@ -51,6 +51,13 @@ pub use nonlinear_model::{
     DifferentiableValue, NonlinearExpression, NonlinearModel, NonlinearNode,
 };
 
+pub mod constrained_nonlinear;
+pub use constrained_nonlinear::{
+    minimize_constrained, minimize_constrained_with_observer, ConstrainedIteration,
+    ConstrainedNonlinearProblem, ConstrainedOptions, ConstrainedResult, ConstrainedTermination,
+    ConstraintMultiplier, NonlinearConstraint,
+};
+
 /// Bound on a variable or constraint. `None` means unbounded in that
 /// direction (`-inf` / `+inf`).
 #[derive(Debug, Clone, Copy, PartialEq)]
