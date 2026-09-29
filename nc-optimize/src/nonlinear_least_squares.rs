@@ -1,6 +1,6 @@
 //! Levenberg-Marquardt nonlinear least squares with an analytic Jacobian.
 
-use crate::{NonlinearTermination, OptimizeError};
+use crate::{Bound, NonlinearTermination, OptimizeError};
 use nc_decomp::least_squares_qr;
 
 #[derive(Debug, Clone, Copy)]
@@ -54,6 +54,14 @@ pub struct NonlinearLeastSquaresIteration {
     pub evaluations: usize,
 }
 
+/// Loss applied independently to each weighted residual.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RobustLoss {
+    Squared,
+    Huber { scale: f64 },
+    Cauchy { scale: f64 },
+}
+
 /// `evaluate` returns residuals and a row-major Jacobian (`m` rows by `n`
 /// parameters). The objective is `0.5 * ||residuals||²`.
 pub fn nonlinear_least_squares<F>(
@@ -64,11 +72,70 @@ pub fn nonlinear_least_squares<F>(
 where
     F: FnMut(&[f64]) -> Result<(Vec<f64>, Vec<Vec<f64>>), OptimizeError>,
 {
-    nonlinear_least_squares_with_observer(initial, options, evaluate, |_| true)
+    let bounds = vec![Bound::free(); initial.len()];
+    nonlinear_least_squares_configured_with_observer(
+        initial,
+        &bounds,
+        &[],
+        RobustLoss::Squared,
+        options,
+        evaluate,
+        |_| true,
+    )
 }
 
 pub fn nonlinear_least_squares_with_observer<F, O>(
     initial: &[f64],
+    options: NonlinearLeastSquaresOptions,
+    evaluate: F,
+    observer: O,
+) -> Result<NonlinearLeastSquaresResult, OptimizeError>
+where
+    F: FnMut(&[f64]) -> Result<(Vec<f64>, Vec<Vec<f64>>), OptimizeError>,
+    O: FnMut(NonlinearLeastSquaresIteration) -> bool,
+{
+    let bounds = vec![Bound::free(); initial.len()];
+    nonlinear_least_squares_configured_with_observer(
+        initial,
+        &bounds,
+        &[],
+        RobustLoss::Squared,
+        options,
+        evaluate,
+        observer,
+    )
+}
+
+/// Weighted robust nonlinear least squares with optional box constraints.
+/// Empty `weights` means unit weights; otherwise there must be one finite,
+/// non-negative weight per residual.
+pub fn nonlinear_least_squares_configured<F>(
+    initial: &[f64],
+    bounds: &[Bound],
+    weights: &[f64],
+    loss: RobustLoss,
+    options: NonlinearLeastSquaresOptions,
+    evaluate: F,
+) -> Result<NonlinearLeastSquaresResult, OptimizeError>
+where
+    F: FnMut(&[f64]) -> Result<(Vec<f64>, Vec<Vec<f64>>), OptimizeError>,
+{
+    nonlinear_least_squares_configured_with_observer(
+        initial,
+        bounds,
+        weights,
+        loss,
+        options,
+        evaluate,
+        |_| true,
+    )
+}
+
+pub fn nonlinear_least_squares_configured_with_observer<F, O>(
+    initial: &[f64],
+    bounds: &[Bound],
+    weights: &[f64],
+    loss: RobustLoss,
     options: NonlinearLeastSquaresOptions,
     mut evaluate: F,
     mut observer: O,
@@ -83,17 +150,25 @@ where
             "nonlinear least squares requires a non-empty finite initial point".to_owned(),
         ));
     }
-    let mut point = initial.to_vec();
+    validate_configuration(initial.len(), bounds, loss)?;
+    let mut point: Vec<f64> = initial
+        .iter()
+        .zip(bounds)
+        .map(|(&x, b)| project(x, b))
+        .collect();
     let (mut residuals, mut jacobian) = evaluate_checked(&mut evaluate, &point)?;
+    validate_weights(weights, residuals.len())?;
     let mut evaluations = 1;
-    let mut cost = least_squares_cost(&residuals);
+    let mut cost = robust_cost(&residuals, weights, loss);
     let mut damping = options.initial_damping;
     let mut accepted_steps = 0;
     let mut rejected_steps = 0;
 
     for iteration in 0..options.max_iterations {
-        let (normal, gradient) = normal_equations(&jacobian, &residuals, point.len());
-        let gradient_norm = infinity_norm(&gradient);
+        let (scaled_residuals, scaled_jacobian) =
+            scaled_problem(&residuals, &jacobian, weights, loss);
+        let (normal, gradient) = normal_equations(&scaled_jacobian, &scaled_residuals, point.len());
+        let gradient_norm = infinity_norm(&projected_gradient(&point, &gradient, bounds));
         if gradient_norm <= options.gradient_tolerance {
             return Ok(result(
                 point,
@@ -112,19 +187,27 @@ where
         let mut accepted = None;
         for _ in 0..options.max_damping_iterations {
             let (augmented, rhs) =
-                damped_least_squares_system(&jacobian, &residuals, &normal, damping);
+                damped_least_squares_system(&scaled_jacobian, &scaled_residuals, &normal, damping);
             if let Some(step) = least_squares_qr(&augmented, &rhs, 1e-12) {
                 let candidate: Vec<f64> = point
                     .iter()
                     .zip(&step)
-                    .map(|(x, delta)| x + delta)
+                    .zip(bounds)
+                    .map(|((x, delta), bound)| project(x + delta, bound))
                     .collect();
+                let actual_step: Vec<f64> =
+                    candidate.iter().zip(&point).map(|(a, b)| a - b).collect();
                 if candidate.iter().all(|v| v.is_finite()) {
                     let evaluated = evaluate_checked(&mut evaluate, &candidate);
                     evaluations += 1;
                     if let Ok((next_residuals, next_jacobian)) = evaluated {
-                        let next_cost = least_squares_cost(&next_residuals);
-                        let predicted = predicted_reduction(&gradient, &normal, &step);
+                        if next_residuals.len() != residuals.len() {
+                            return Err(OptimizeError::InvalidProblem(
+                                "residual count must remain constant".into(),
+                            ));
+                        }
+                        let next_cost = robust_cost(&next_residuals, weights, loss);
+                        let predicted = predicted_reduction(&gradient, &normal, &actual_step);
                         let gain_ratio = if predicted > 0.0 {
                             (cost - next_cost) / predicted
                         } else {
@@ -136,7 +219,7 @@ where
                                 next_residuals,
                                 next_jacobian,
                                 next_cost,
-                                euclidean_norm(&step),
+                                euclidean_norm(&actual_step),
                             ));
                             if gain_ratio > 0.75 {
                                 damping =
@@ -177,20 +260,23 @@ where
         residuals = next_residuals;
         jacobian = next_jacobian;
         cost = next_cost;
-        let (_, observed_gradient) = normal_equations(&jacobian, &residuals, point.len());
+        let (sr, sj) = scaled_problem(&residuals, &jacobian, weights, loss);
+        let (_, observed_gradient) = normal_equations(&sj, &sr, point.len());
         if !observer(NonlinearLeastSquaresIteration {
             iteration: iteration + 1,
             cost,
-            gradient_norm: infinity_norm(&observed_gradient),
+            gradient_norm: infinity_norm(&projected_gradient(&point, &observed_gradient, bounds)),
             step_norm,
             damping,
             evaluations,
         }) {
+            let projected_norm =
+                infinity_norm(&projected_gradient(&point, &observed_gradient, bounds));
             return Ok(result(
                 point,
                 residuals,
                 cost,
-                infinity_norm(&observed_gradient),
+                projected_norm,
                 iteration + 1,
                 evaluations,
                 NonlinearTermination::Cancelled,
@@ -200,12 +286,14 @@ where
             ));
         }
         if step_norm <= options.step_tolerance * (1.0 + euclidean_norm(&point)) {
-            let (_, gradient) = normal_equations(&jacobian, &residuals, point.len());
+            let (sr, sj) = scaled_problem(&residuals, &jacobian, weights, loss);
+            let (_, gradient) = normal_equations(&sj, &sr, point.len());
+            let projected_norm = infinity_norm(&projected_gradient(&point, &gradient, bounds));
             return Ok(result(
                 point,
                 residuals,
                 cost,
-                infinity_norm(&gradient),
+                projected_norm,
                 iteration + 1,
                 evaluations,
                 NonlinearTermination::ConvergedStep,
@@ -215,12 +303,14 @@ where
             ));
         }
         if cost_change <= options.cost_tolerance * (1.0 + cost) {
-            let (_, gradient) = normal_equations(&jacobian, &residuals, point.len());
+            let (sr, sj) = scaled_problem(&residuals, &jacobian, weights, loss);
+            let (_, gradient) = normal_equations(&sj, &sr, point.len());
+            let projected_norm = infinity_norm(&projected_gradient(&point, &gradient, bounds));
             return Ok(result(
                 point,
                 residuals,
                 cost,
-                infinity_norm(&gradient),
+                projected_norm,
                 iteration + 1,
                 evaluations,
                 NonlinearTermination::ConvergedObjective,
@@ -230,12 +320,14 @@ where
             ));
         }
     }
-    let (_, gradient) = normal_equations(&jacobian, &residuals, point.len());
+    let (sr, sj) = scaled_problem(&residuals, &jacobian, weights, loss);
+    let (_, gradient) = normal_equations(&sj, &sr, point.len());
+    let projected_norm = infinity_norm(&projected_gradient(&point, &gradient, bounds));
     Ok(result(
         point,
         residuals,
         cost,
-        infinity_norm(&gradient),
+        projected_norm,
         options.max_iterations,
         evaluations,
         NonlinearTermination::IterationLimit,
@@ -243,6 +335,118 @@ where
         accepted_steps,
         rejected_steps,
     ))
+}
+
+fn validate_configuration(
+    n: usize,
+    bounds: &[Bound],
+    loss: RobustLoss,
+) -> Result<(), OptimizeError> {
+    if bounds.len() != n
+        || bounds.iter().any(|b| {
+            b.lower.is_some_and(|v| !v.is_finite())
+                || b.upper.is_some_and(|v| !v.is_finite())
+                || matches!((b.lower,b.upper),(Some(l),Some(u)) if l>u)
+        })
+    {
+        return Err(OptimizeError::InvalidProblem(
+            "parameter bounds must match the point and be valid".into(),
+        ));
+    }
+    let scale = match loss {
+        RobustLoss::Squared => return Ok(()),
+        RobustLoss::Huber { scale } | RobustLoss::Cauchy { scale } => scale,
+    };
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err(OptimizeError::InvalidConfiguration(
+            "robust loss scale must be finite and positive",
+        ));
+    }
+    Ok(())
+}
+fn validate_weights(weights: &[f64], m: usize) -> Result<(), OptimizeError> {
+    if !weights.is_empty()
+        && (weights.len() != m || weights.iter().any(|w| !w.is_finite() || *w < 0.0))
+    {
+        return Err(OptimizeError::InvalidProblem(
+            "weights must be empty or one finite non-negative value per residual".into(),
+        ));
+    }
+    Ok(())
+}
+fn project(x: f64, b: &Bound) -> f64 {
+    b.lower
+        .map_or(x, |l| x.max(l))
+        .min(b.upper.unwrap_or(f64::INFINITY))
+}
+fn projected_gradient(x: &[f64], g: &[f64], bounds: &[Bound]) -> Vec<f64> {
+    x.iter()
+        .zip(g)
+        .zip(bounds)
+        .map(|((&x, &g), b)| {
+            if (b.lower.is_some_and(|l| x <= l) && g > 0.0)
+                || (b.upper.is_some_and(|u| x >= u) && g < 0.0)
+            {
+                0.0
+            } else {
+                g
+            }
+        })
+        .collect()
+}
+fn observation_weight(weights: &[f64], i: usize) -> f64 {
+    if weights.is_empty() {
+        1.0
+    } else {
+        weights[i]
+    }
+}
+fn robust_cost(r: &[f64], w: &[f64], loss: RobustLoss) -> f64 {
+    r.iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let rho = match loss {
+                RobustLoss::Squared => 0.5 * v * v,
+                RobustLoss::Huber { scale } => {
+                    if v.abs() <= scale {
+                        0.5 * v * v
+                    } else {
+                        scale * (v.abs() - 0.5 * scale)
+                    }
+                }
+                RobustLoss::Cauchy { scale } => {
+                    0.5 * scale * scale * (1.0 + (v / scale).powi(2)).ln()
+                }
+            };
+            observation_weight(w, i) * rho
+        })
+        .sum()
+}
+fn scaled_problem(
+    r: &[f64],
+    j: &[Vec<f64>],
+    w: &[f64],
+    loss: RobustLoss,
+) -> (Vec<f64>, Vec<Vec<f64>>) {
+    let mut sr = Vec::with_capacity(r.len());
+    let mut sj = Vec::with_capacity(r.len());
+    for (i, &v) in r.iter().enumerate() {
+        let rw = match loss {
+            RobustLoss::Squared => 1.0,
+            RobustLoss::Huber { scale } => {
+                if v.abs() <= scale || v == 0.0 {
+                    1.0
+                } else {
+                    scale / v.abs()
+                }
+            }
+            RobustLoss::Cauchy { scale } => 1.0 / (1.0 + (v / scale).powi(2)),
+        };
+        let s = (observation_weight(w, i) * rw).sqrt();
+        sr.push(s * v);
+        sj.push(j[i].iter().map(|x| s * x).collect());
+    }
+    (sr, sj)
 }
 
 fn validate_options(options: NonlinearLeastSquaresOptions) -> Result<(), OptimizeError> {
@@ -366,9 +570,6 @@ fn damped_least_squares_system(
     (matrix, rhs)
 }
 
-fn least_squares_cost(r: &[f64]) -> f64 {
-    0.5 * r.iter().map(|v| v * v).sum::<f64>()
-}
 fn euclidean_norm(x: &[f64]) -> f64 {
     x.iter().map(|v| v * v).sum::<f64>().sqrt()
 }
@@ -408,5 +609,64 @@ mod tests {
             Ok((vec![1.0], vec![vec![]]))
         });
         assert!(matches!(value, Err(OptimizeError::InvalidProblem(_))));
+    }
+
+    #[test]
+    fn huber_fit_resists_an_outlier_and_honors_bounds() {
+        let xs = [0.0, 1.0, 2.0, 3.0, 4.0];
+        let ys = [1.0, 3.0, 5.0, 7.0, 100.0];
+        let bounds = [
+            Bound {
+                lower: Some(0.0),
+                upper: Some(1.5),
+            },
+            Bound::free(),
+        ];
+        let fit = nonlinear_least_squares_configured(
+            &[0.0, 0.0],
+            &bounds,
+            &[],
+            RobustLoss::Huber { scale: 1.0 },
+            Default::default(),
+            |p| {
+                Ok((
+                    xs.iter()
+                        .zip(ys)
+                        .map(|(&x, y)| p[0] + p[1] * x - y)
+                        .collect(),
+                    xs.iter().map(|&x| vec![1.0, x]).collect(),
+                ))
+            },
+        )
+        .unwrap();
+        assert!(fit.point[0] >= 0.0 && fit.point[0] <= 1.5);
+        assert!((fit.point[0] - 1.0).abs() < 0.51);
+        assert!((fit.point[1] - 2.0).abs() < 0.6);
+    }
+
+    #[test]
+    fn zero_weight_excludes_an_outlier() {
+        let bounds = [Bound::free(), Bound::free()];
+        let weights = [1.0, 1.0, 1.0, 0.0];
+        let fit = nonlinear_least_squares_configured(
+            &[0.0, 0.0],
+            &bounds,
+            &weights,
+            RobustLoss::Squared,
+            Default::default(),
+            |p| {
+                let xs = [0.0, 1.0, 2.0, 3.0];
+                let ys = [1.0, 3.0, 5.0, 99.0];
+                Ok((
+                    xs.iter()
+                        .zip(ys)
+                        .map(|(&x, y)| p[0] + p[1] * x - y)
+                        .collect(),
+                    xs.iter().map(|&x| vec![1.0, x]).collect(),
+                ))
+            },
+        )
+        .unwrap();
+        assert!((fit.point[0] - 1.0).abs() < 1e-6 && (fit.point[1] - 2.0).abs() < 1e-6);
     }
 }

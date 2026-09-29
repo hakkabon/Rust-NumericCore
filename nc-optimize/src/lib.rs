@@ -31,10 +31,15 @@ pub use lbfgs::{
     LbfgsResult, NonlinearTermination,
 };
 
+pub mod lbfgsb;
+pub use lbfgsb::{minimize_lbfgsb, minimize_lbfgsb_with_observer};
+
 pub mod nonlinear_least_squares;
 pub use nonlinear_least_squares::{
-    nonlinear_least_squares, nonlinear_least_squares_with_observer,
+    nonlinear_least_squares, nonlinear_least_squares_configured,
+    nonlinear_least_squares_configured_with_observer, nonlinear_least_squares_with_observer,
     NonlinearLeastSquaresIteration, NonlinearLeastSquaresOptions, NonlinearLeastSquaresResult,
+    RobustLoss,
 };
 
 pub mod derivative_check;
