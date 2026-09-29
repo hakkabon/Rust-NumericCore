@@ -45,9 +45,15 @@ pub use nonlinear_least_squares::{
 pub mod derivative_check;
 pub use derivative_check::{check_gradient, check_jacobian, DerivativeCheckReport};
 
+pub mod nonlinear_model;
+pub use nonlinear_model::{
+    minimize_model_lbfgs, minimize_model_lbfgsb, solve_model_least_squares,
+    DifferentiableValue, NonlinearExpression, NonlinearModel, NonlinearNode,
+};
+
 /// Bound on a variable or constraint. `None` means unbounded in that
 /// direction (`-inf` / `+inf`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Bound {
     pub lower: Option<f64>,
     pub upper: Option<f64>,
