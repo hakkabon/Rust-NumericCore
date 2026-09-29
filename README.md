@@ -25,7 +25,7 @@ Rust-NumericCore/
 ├── nc-kernels-generic/   # pure-Rust fallback kernels (matmul, axpy, dot, norm) — implemented
 ├── nc-kernels-simd/      # SIMD kernels (scaffold; nightly-gated)
 ├── nc-sparse/            # validated CSR sparse matrices + SpMV / transpose-SpMV — implemented
-├── nc-decomp/            # dense Cholesky solve (cholesky_solve), added for nc-optimize's interior-point normal equations
+├── nc-decomp/            # portable dense Cholesky and Householder-QR least-squares solves
 ├── nc-iterative/         # preconditioned CG/BiCGSTAB/restarted GMRES plus CGLS sparse statistics
 ├── nc-optimize/          # LP/MILP plus closure-based L-BFGS and Levenberg-Marquardt nonlinear least squares
 ├── nc-ffi/               # UniFFI surface — matmul/dot/axpy/norm2/spmv (f64+f32), opt-in FfiVectorF64/F32 zero-copy buffers, solve_lp_simplex/solve_lp_interior_point/solve_milp_branch_and_bound

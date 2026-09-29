@@ -221,3 +221,20 @@ automatic-differentiation representation, or reverse-communication protocol
 can become the shared FFI boundary when constrained nonlinear optimization
 and nonlinear AMPL syntax are designed. Convex quadratic programming remains
 deferred as requested rather than being introduced indirectly here.
+
+## Update (Phase 7: nonlinear correctness and conformance)
+
+The nonlinear layer now includes scale-aware central-difference gradient and
+Jacobian checks with worst-entry error reports. L-BFGS strengthens Armijo
+backtracking with the strong-Wolfe curvature condition and reports final
+gradient norm, accepted step, and retained curvature history. Both nonlinear
+solvers expose iteration snapshots and cooperative cancellation as a distinct
+termination reason rather than a numerical failure.
+
+Levenberg-Marquardt now accepts or rejects steps using actual-versus-predicted
+reduction, reports damping and accepted/rejected step counts, and solves the
+damped linearized least-squares problem with Householder QR. This avoids
+forming the damped normal equations for the step and therefore avoids squaring
+the Jacobian condition number. Rosenbrock derivatives/optimization and the
+same exponential residual/Jacobian model are exercised in both Rust and Swift
+as cross-language behavioral conformance cases.

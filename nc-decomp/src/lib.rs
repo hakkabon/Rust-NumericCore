@@ -88,6 +88,79 @@ pub fn cholesky_solve(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
     Some(x)
 }
 
+/// Solves an overdetermined least-squares system with Householder QR.
+/// Returns `None` for malformed or numerically rank-deficient systems.
+pub fn least_squares_qr(a: &[Vec<f64>], b: &[f64], tolerance: f64) -> Option<Vec<f64>> {
+    let m = a.len();
+    let n = a.first()?.len();
+    if m < n
+        || b.len() != m
+        || n == 0
+        || !tolerance.is_finite()
+        || tolerance <= 0.0
+        || a.iter().any(|row| row.len() != n)
+    {
+        return None;
+    }
+    let mut r = a.to_vec();
+    let mut qtb = b.to_vec();
+    let scale = a
+        .iter()
+        .flatten()
+        .map(|v| v.abs())
+        .fold(0.0, f64::max)
+        .max(1.0);
+    for column in 0..n {
+        let norm = (column..m)
+            .map(|row| r[row][column] * r[row][column])
+            .sum::<f64>()
+            .sqrt();
+        if norm <= tolerance * scale {
+            return None;
+        }
+        let alpha = if r[column][column] >= 0.0 {
+            -norm
+        } else {
+            norm
+        };
+        let mut v: Vec<f64> = (column..m).map(|row| r[row][column]).collect();
+        v[0] -= alpha;
+        let v_norm_sq: f64 = v.iter().map(|x| x * x).sum();
+        if v_norm_sq == 0.0 {
+            return None;
+        }
+        for j in column..n {
+            let projection = 2.0
+                * v.iter()
+                    .enumerate()
+                    .map(|(offset, value)| value * r[column + offset][j])
+                    .sum::<f64>()
+                / v_norm_sq;
+            for (offset, value) in v.iter().enumerate() {
+                r[column + offset][j] -= projection * value;
+            }
+        }
+        let projection = 2.0
+            * v.iter()
+                .enumerate()
+                .map(|(offset, value)| value * qtb[column + offset])
+                .sum::<f64>()
+            / v_norm_sq;
+        for (offset, value) in v.iter().enumerate() {
+            qtb[column + offset] -= projection * value;
+        }
+    }
+    let mut x = vec![0.0; n];
+    for i in (0..n).rev() {
+        if r[i][i].abs() <= tolerance * scale {
+            return None;
+        }
+        let tail: f64 = ((i + 1)..n).map(|j| r[i][j] * x[j]).sum();
+        x[i] = (qtb[i] - tail) / r[i][i];
+    }
+    x.iter().all(|v| v.is_finite()).then_some(x)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,7 +192,11 @@ mod tests {
     #[test]
     fn handles_larger_random_looking_spd_system() {
         // A = M^T M + I is guaranteed SPD for any M.
-        let m = vec![vec![1.0, 2.0, 0.0], vec![0.0, 1.0, 1.0], vec![2.0, 0.0, 1.0]];
+        let m = vec![
+            vec![1.0, 2.0, 0.0],
+            vec![0.0, 1.0, 1.0],
+            vec![2.0, 0.0, 1.0],
+        ];
         let mut a = vec![vec![0.0; 3]; 3];
         for i in 0..3 {
             for j in 0..3 {
@@ -145,5 +222,12 @@ mod tests {
     fn empty_system_returns_empty_solution() {
         assert_eq!(cholesky_solve(&[], &[]), Some(vec![]));
     }
-}
 
+    #[test]
+    fn householder_qr_solves_overdetermined_least_squares() {
+        let a = vec![vec![1.0, 0.0], vec![1.0, 1.0], vec![1.0, 2.0]];
+        let x = least_squares_qr(&a, &[1.0, 3.0, 5.0], 1e-12).unwrap();
+        assert!((x[0] - 1.0).abs() < 1e-10);
+        assert!((x[1] - 2.0).abs() < 1e-10);
+    }
+}

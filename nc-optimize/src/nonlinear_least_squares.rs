@@ -1,7 +1,7 @@
 //! Levenberg-Marquardt nonlinear least squares with an analytic Jacobian.
 
 use crate::{NonlinearTermination, OptimizeError};
-use nc_decomp::cholesky_solve;
+use nc_decomp::least_squares_qr;
 
 #[derive(Debug, Clone, Copy)]
 pub struct NonlinearLeastSquaresOptions {
@@ -39,6 +39,19 @@ pub struct NonlinearLeastSquaresResult {
     pub iterations: usize,
     pub evaluations: usize,
     pub termination: NonlinearTermination,
+    pub final_damping: f64,
+    pub accepted_steps: usize,
+    pub rejected_steps: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NonlinearLeastSquaresIteration {
+    pub iteration: usize,
+    pub cost: f64,
+    pub gradient_norm: f64,
+    pub step_norm: f64,
+    pub damping: f64,
+    pub evaluations: usize,
 }
 
 /// `evaluate` returns residuals and a row-major Jacobian (`m` rows by `n`
@@ -46,10 +59,23 @@ pub struct NonlinearLeastSquaresResult {
 pub fn nonlinear_least_squares<F>(
     initial: &[f64],
     options: NonlinearLeastSquaresOptions,
-    mut evaluate: F,
+    evaluate: F,
 ) -> Result<NonlinearLeastSquaresResult, OptimizeError>
 where
     F: FnMut(&[f64]) -> Result<(Vec<f64>, Vec<Vec<f64>>), OptimizeError>,
+{
+    nonlinear_least_squares_with_observer(initial, options, evaluate, |_| true)
+}
+
+pub fn nonlinear_least_squares_with_observer<F, O>(
+    initial: &[f64],
+    options: NonlinearLeastSquaresOptions,
+    mut evaluate: F,
+    mut observer: O,
+) -> Result<NonlinearLeastSquaresResult, OptimizeError>
+where
+    F: FnMut(&[f64]) -> Result<(Vec<f64>, Vec<Vec<f64>>), OptimizeError>,
+    O: FnMut(NonlinearLeastSquaresIteration) -> bool,
 {
     validate_options(options)?;
     if initial.is_empty() || !initial.iter().all(|v| v.is_finite()) {
@@ -62,6 +88,8 @@ where
     let mut evaluations = 1;
     let mut cost = least_squares_cost(&residuals);
     let mut damping = options.initial_damping;
+    let mut accepted_steps = 0;
+    let mut rejected_steps = 0;
 
     for iteration in 0..options.max_iterations {
         let (normal, gradient) = normal_equations(&jacobian, &residuals, point.len());
@@ -75,17 +103,17 @@ where
                 iteration,
                 evaluations,
                 NonlinearTermination::ConvergedGradient,
+                damping,
+                accepted_steps,
+                rejected_steps,
             ));
         }
 
         let mut accepted = None;
         for _ in 0..options.max_damping_iterations {
-            let mut damped = normal.clone();
-            for j in 0..point.len() {
-                damped[j][j] += damping * normal[j][j].abs().max(1.0);
-            }
-            let rhs: Vec<f64> = gradient.iter().map(|v| -v).collect();
-            if let Some(step) = cholesky_solve(&damped, &rhs) {
+            let (augmented, rhs) =
+                damped_least_squares_system(&jacobian, &residuals, &normal, damping);
+            if let Some(step) = least_squares_qr(&augmented, &rhs, 1e-12) {
                 let candidate: Vec<f64> = point
                     .iter()
                     .zip(&step)
@@ -96,7 +124,13 @@ where
                     evaluations += 1;
                     if let Ok((next_residuals, next_jacobian)) = evaluated {
                         let next_cost = least_squares_cost(&next_residuals);
-                        if next_cost < cost {
+                        let predicted = predicted_reduction(&gradient, &normal, &step);
+                        let gain_ratio = if predicted > 0.0 {
+                            (cost - next_cost) / predicted
+                        } else {
+                            f64::NEG_INFINITY
+                        };
+                        if gain_ratio > 0.0 && next_cost < cost {
                             accepted = Some((
                                 candidate,
                                 next_residuals,
@@ -104,13 +138,20 @@ where
                                 next_cost,
                                 euclidean_norm(&step),
                             ));
-                            damping = (damping * options.damping_decrease).max(f64::MIN_POSITIVE);
+                            if gain_ratio > 0.75 {
+                                damping =
+                                    (damping * options.damping_decrease).max(f64::MIN_POSITIVE);
+                            } else if gain_ratio < 0.25 {
+                                damping *= options.damping_increase;
+                            }
+                            accepted_steps += 1;
                             break;
                         }
                     }
                 }
             }
             damping *= options.damping_increase;
+            rejected_steps += 1;
             if !damping.is_finite() {
                 break;
             }
@@ -126,6 +167,9 @@ where
                 iteration,
                 evaluations,
                 NonlinearTermination::DampingLimit,
+                damping,
+                accepted_steps,
+                rejected_steps,
             ));
         };
         let cost_change = cost - next_cost;
@@ -133,6 +177,28 @@ where
         residuals = next_residuals;
         jacobian = next_jacobian;
         cost = next_cost;
+        let (_, observed_gradient) = normal_equations(&jacobian, &residuals, point.len());
+        if !observer(NonlinearLeastSquaresIteration {
+            iteration: iteration + 1,
+            cost,
+            gradient_norm: infinity_norm(&observed_gradient),
+            step_norm,
+            damping,
+            evaluations,
+        }) {
+            return Ok(result(
+                point,
+                residuals,
+                cost,
+                infinity_norm(&observed_gradient),
+                iteration + 1,
+                evaluations,
+                NonlinearTermination::Cancelled,
+                damping,
+                accepted_steps,
+                rejected_steps,
+            ));
+        }
         if step_norm <= options.step_tolerance * (1.0 + euclidean_norm(&point)) {
             let (_, gradient) = normal_equations(&jacobian, &residuals, point.len());
             return Ok(result(
@@ -143,6 +209,9 @@ where
                 iteration + 1,
                 evaluations,
                 NonlinearTermination::ConvergedStep,
+                damping,
+                accepted_steps,
+                rejected_steps,
             ));
         }
         if cost_change <= options.cost_tolerance * (1.0 + cost) {
@@ -155,6 +224,9 @@ where
                 iteration + 1,
                 evaluations,
                 NonlinearTermination::ConvergedObjective,
+                damping,
+                accepted_steps,
+                rejected_steps,
             ));
         }
     }
@@ -167,6 +239,9 @@ where
         options.max_iterations,
         evaluations,
         NonlinearTermination::IterationLimit,
+        damping,
+        accepted_steps,
+        rejected_steps,
     ))
 }
 
@@ -245,6 +320,9 @@ fn result(
     iterations: usize,
     evaluations: usize,
     termination: NonlinearTermination,
+    final_damping: f64,
+    accepted_steps: usize,
+    rejected_steps: usize,
 ) -> NonlinearLeastSquaresResult {
     NonlinearLeastSquaresResult {
         point,
@@ -254,7 +332,38 @@ fn result(
         iterations,
         evaluations,
         termination,
+        final_damping,
+        accepted_steps,
+        rejected_steps,
     }
+}
+
+fn predicted_reduction(gradient: &[f64], normal: &[Vec<f64>], step: &[f64]) -> f64 {
+    let linear: f64 = gradient.iter().zip(step).map(|(g, s)| g * s).sum();
+    let quadratic: f64 = normal
+        .iter()
+        .enumerate()
+        .map(|(i, row)| 0.5 * step[i] * row.iter().zip(step).map(|(a, s)| a * s).sum::<f64>())
+        .sum();
+    -linear - quadratic
+}
+
+fn damped_least_squares_system(
+    jacobian: &[Vec<f64>],
+    residuals: &[f64],
+    normal: &[Vec<f64>],
+    damping: f64,
+) -> (Vec<Vec<f64>>, Vec<f64>) {
+    let n = normal.len();
+    let mut matrix = jacobian.to_vec();
+    let mut rhs: Vec<f64> = residuals.iter().map(|value| -value).collect();
+    for j in 0..n {
+        let mut row = vec![0.0; n];
+        row[j] = (damping * normal[j][j].abs().max(1.0)).sqrt();
+        matrix.push(row);
+        rhs.push(0.0);
+    }
+    (matrix, rhs)
 }
 
 fn least_squares_cost(r: &[f64]) -> f64 {
@@ -289,6 +398,8 @@ mod tests {
         assert!((result.point[0] - 2.5).abs() < 1e-6);
         assert!((result.point[1] + 0.7).abs() < 1e-6);
         assert!(result.cost < 1e-18);
+        assert!(result.accepted_steps > 0);
+        assert!(result.final_damping.is_finite());
     }
 
     #[test]

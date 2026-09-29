@@ -26,12 +26,19 @@ pub use branch_and_bound::{
 };
 
 pub mod lbfgs;
-pub use lbfgs::{minimize_lbfgs, LbfgsOptions, LbfgsResult, NonlinearTermination};
+pub use lbfgs::{
+    minimize_lbfgs, minimize_lbfgs_with_observer, LbfgsIteration, LbfgsOptions,
+    LbfgsResult, NonlinearTermination,
+};
 
 pub mod nonlinear_least_squares;
 pub use nonlinear_least_squares::{
-    nonlinear_least_squares, NonlinearLeastSquaresOptions, NonlinearLeastSquaresResult,
+    nonlinear_least_squares, nonlinear_least_squares_with_observer,
+    NonlinearLeastSquaresIteration, NonlinearLeastSquaresOptions, NonlinearLeastSquaresResult,
 };
+
+pub mod derivative_check;
+pub use derivative_check::{check_gradient, check_jacobian, DerivativeCheckReport};
 
 /// Bound on a variable or constraint. `None` means unbounded in that
 /// direction (`-inf` / `+inf`).

@@ -10,6 +10,7 @@ pub enum NonlinearTermination {
     IterationLimit,
     LineSearchFailed,
     DampingLimit,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -21,6 +22,7 @@ pub struct LbfgsOptions {
     pub objective_tolerance: f64,
     pub max_line_search_iterations: usize,
     pub armijo: f64,
+    pub wolfe: f64,
     pub backtracking: f64,
 }
 
@@ -34,6 +36,7 @@ impl Default for LbfgsOptions {
             objective_tolerance: 1e-12,
             max_line_search_iterations: 30,
             armijo: 1e-4,
+            wolfe: 0.9,
             backtracking: 0.5,
         }
     }
@@ -47,15 +50,40 @@ pub struct LbfgsResult {
     pub iterations: usize,
     pub evaluations: usize,
     pub termination: NonlinearTermination,
+    pub gradient_norm: f64,
+    pub accepted_step: Option<f64>,
+    pub stored_curvature_pairs: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LbfgsIteration {
+    pub iteration: usize,
+    pub objective: f64,
+    pub gradient_norm: f64,
+    pub step: f64,
+    pub evaluations: usize,
 }
 
 pub fn minimize_lbfgs<F>(
     initial: &[f64],
     options: LbfgsOptions,
-    mut evaluate: F,
+    evaluate: F,
 ) -> Result<LbfgsResult, OptimizeError>
 where
     F: FnMut(&[f64]) -> Result<(f64, Vec<f64>), OptimizeError>,
+{
+    minimize_lbfgs_with_observer(initial, options, evaluate, |_| true)
+}
+
+pub fn minimize_lbfgs_with_observer<F, O>(
+    initial: &[f64],
+    options: LbfgsOptions,
+    mut evaluate: F,
+    mut observer: O,
+) -> Result<LbfgsResult, OptimizeError>
+where
+    F: FnMut(&[f64]) -> Result<(f64, Vec<f64>), OptimizeError>,
+    O: FnMut(LbfgsIteration) -> bool,
 {
     validate_options(options)?;
     if initial.is_empty() || !initial.iter().all(|v| v.is_finite()) {
@@ -69,6 +97,7 @@ where
     let mut s_history: Vec<Vec<f64>> = Vec::new();
     let mut y_history: Vec<Vec<f64>> = Vec::new();
     let mut rho_history: Vec<f64> = Vec::new();
+    let mut last_step = None;
 
     for iteration in 0..options.max_iterations {
         if infinity_norm(&gradient) <= options.gradient_tolerance {
@@ -79,6 +108,8 @@ where
                 iteration,
                 evaluations,
                 NonlinearTermination::ConvergedGradient,
+                last_step,
+                s_history.len(),
             ));
         }
 
@@ -93,6 +124,7 @@ where
         }
 
         let mut step = 1.0;
+        let mut upper_step: Option<f64> = None;
         let mut accepted = None;
         for _ in 0..options.max_line_search_iterations {
             let candidate: Vec<f64> = x
@@ -104,10 +136,23 @@ where
                 let evaluated = evaluate_checked(&mut evaluate, &candidate);
                 evaluations += 1;
                 if let Ok((candidate_value, candidate_gradient)) = evaluated {
-                    if candidate_value <= value + options.armijo * step * directional_derivative {
+                    let candidate_slope = dot(&candidate_gradient, &direction);
+                    let sufficient_decrease =
+                        candidate_value <= value + options.armijo * step * directional_derivative;
+                    let curvature =
+                        candidate_slope.abs() <= options.wolfe * directional_derivative.abs();
+                    if sufficient_decrease && curvature {
                         accepted = Some((candidate, candidate_value, candidate_gradient, step));
                         break;
+                    } else if !sufficient_decrease || candidate_slope >= 0.0 {
+                        upper_step = Some(step);
+                        step *= options.backtracking;
+                    } else if let Some(upper) = upper_step {
+                        step = 0.5 * (step + upper);
+                    } else {
+                        step /= options.backtracking;
                     }
+                    continue;
                 }
             }
             step *= options.backtracking;
@@ -120,6 +165,8 @@ where
                 iteration,
                 evaluations,
                 NonlinearTermination::LineSearchFailed,
+                last_step,
+                s_history.len(),
             ));
         };
 
@@ -142,10 +189,29 @@ where
         }
 
         let step_norm = accepted_step * euclidean_norm(&direction);
+        last_step = Some(accepted_step);
         let objective_change = (value - next_value).abs();
         x = next_x;
         value = next_value;
         gradient = next_gradient;
+        if !observer(LbfgsIteration {
+            iteration: iteration + 1,
+            objective: value,
+            gradient_norm: infinity_norm(&gradient),
+            step: accepted_step,
+            evaluations,
+        }) {
+            return Ok(result(
+                x,
+                value,
+                gradient,
+                iteration + 1,
+                evaluations,
+                NonlinearTermination::Cancelled,
+                last_step,
+                s_history.len(),
+            ));
+        }
         if step_norm <= options.step_tolerance * (1.0 + euclidean_norm(&x)) {
             return Ok(result(
                 x,
@@ -154,6 +220,8 @@ where
                 iteration + 1,
                 evaluations,
                 NonlinearTermination::ConvergedStep,
+                last_step,
+                s_history.len(),
             ));
         }
         if objective_change <= options.objective_tolerance * (1.0 + value.abs()) {
@@ -164,6 +232,8 @@ where
                 iteration + 1,
                 evaluations,
                 NonlinearTermination::ConvergedObjective,
+                last_step,
+                s_history.len(),
             ));
         }
     }
@@ -174,6 +244,8 @@ where
         options.max_iterations,
         evaluations,
         NonlinearTermination::IterationLimit,
+        last_step,
+        s_history.len(),
     ))
 }
 
@@ -189,6 +261,9 @@ fn validate_options(options: LbfgsOptions) -> Result<(), OptimizeError> {
         || options.objective_tolerance <= 0.0
         || !options.armijo.is_finite()
         || !(0.0..1.0).contains(&options.armijo)
+        || !options.wolfe.is_finite()
+        || options.wolfe <= options.armijo
+        || options.wolfe >= 1.0
         || !options.backtracking.is_finite()
         || !(0.0..1.0).contains(&options.backtracking)
     {
@@ -240,7 +315,10 @@ fn result(
     iterations: usize,
     evaluations: usize,
     termination: NonlinearTermination,
+    accepted_step: Option<f64>,
+    stored_curvature_pairs: usize,
 ) -> LbfgsResult {
+    let gradient_norm = infinity_norm(&gradient);
     LbfgsResult {
         point,
         objective,
@@ -248,6 +326,9 @@ fn result(
         iterations,
         evaluations,
         termination,
+        gradient_norm,
+        accepted_step,
+        stored_curvature_pairs,
     }
 }
 
@@ -290,11 +371,26 @@ mod tests {
         assert!((result.point[0] - 1.0).abs() < 1e-5);
         assert!((result.point[1] - 1.0).abs() < 1e-5);
         assert!(result.objective < 1e-12);
+        assert!(result.gradient_norm < 1e-5);
+        assert!(result.accepted_step.is_some());
     }
 
     #[test]
     fn rejects_gradient_dimension_mismatch() {
         let error = minimize_lbfgs(&[0.0], LbfgsOptions::default(), |_| Ok((0.0, vec![])));
         assert!(matches!(error, Err(OptimizeError::InvalidProblem(_))));
+    }
+
+    #[test]
+    fn observer_can_cancel_without_reporting_numerical_failure() {
+        let result = minimize_lbfgs_with_observer(
+            &[4.0],
+            Default::default(),
+            |x| Ok((x[0] * x[0], vec![2.0 * x[0]])),
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(result.termination, NonlinearTermination::Cancelled);
+        assert_eq!(result.iterations, 1);
     }
 }
