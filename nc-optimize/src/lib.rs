@@ -58,6 +58,13 @@ pub use constrained_nonlinear::{
     ConstraintMultiplier, NonlinearConstraint,
 };
 
+pub mod quadratic_program;
+pub use quadratic_program::{
+    solve_convex_qp, solve_convex_qp_warm, solve_convex_qp_with_observer,
+    QuadraticIteration, QuadraticOptions, QuadraticProblem, QuadraticResult,
+    QuadraticTermination, QuadraticWarmStart,
+};
+
 /// Bound on a variable or constraint. `None` means unbounded in that
 /// direction (`-inf` / `+inf`).
 #[derive(Debug, Clone, Copy, PartialEq)]
