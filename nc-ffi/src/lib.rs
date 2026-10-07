@@ -59,6 +59,9 @@ use nc_kernels_generic as kernels;
 use nc_sparse::CsrMatrix;
 use std::sync::{Arc, Mutex};
 
+mod nonlinear;
+pub use nonlinear::*;
+
 uniffi::setup_scaffolding!();
 
 /// Errors that can cross the FFI boundary. Deliberately flat and

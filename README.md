@@ -28,7 +28,7 @@ Rust-NumericCore/
 ├── nc-decomp/            # portable dense Cholesky and Householder-QR least-squares solves
 ├── nc-iterative/         # preconditioned CG/BiCGSTAB/restarted GMRES plus CGLS sparse statistics
 ├── nc-optimize/          # LP/MILP/QP; L-BFGS/LM; shared and constrained nonlinear optimization
-├── nc-ffi/               # UniFFI surface — matmul/dot/axpy/norm2/spmv (f64+f32), opt-in FfiVectorF64/F32 zero-copy buffers, solve_lp_simplex/solve_lp_interior_point/solve_milp_branch_and_bound
+├── nc-ffi/               # UniFFI surface — kernels, sparse solvers, LP/MILP, and shared nonlinear models
 ├── nc-bench/             # Criterion benchmarks (needs a newer cargo than 1.75 for its deps)
 ├── scripts/
 │   └── build-xcframework.sh   # builds the XCFramework + Swift bindings; used locally and by release.yml
