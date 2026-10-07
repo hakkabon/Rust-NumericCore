@@ -1,7 +1,8 @@
 # Rust-NumericCore
 
 The Rust half of NumericCore — storage, kernels, sparse linear algebra,
-iterative solvers, and the AMPL-style optimization interface. Consumed
+iterative solvers, and the solver half of the AMPL-style linear and nonlinear
+optimization interface. Consumed
 from Swift via [`Swift-NumericCore`](https://github.com/hakkabon/Swift-NumericCore),
 which depends on this repo's tagged releases (an XCFramework built by
 `scripts/build-xcframework.sh` / `.github/workflows/release.yml`).
