@@ -5,11 +5,11 @@
 
 use crate::FfiError;
 use nc_optimize::{
-    minimize_constrained, minimize_model_lbfgsb, solve_model_least_squares, Bound,
+    minimize_constrained, minimize_model_lbfgsb, minimize_sqp, solve_model_least_squares, Bound,
     ConstrainedNonlinearProblem, ConstrainedOptions, ConstrainedResult, ConstrainedTermination,
     ConstraintMultiplier, LbfgsOptions, LbfgsResult, NonlinearConstraint, NonlinearExpression,
     NonlinearLeastSquaresOptions, NonlinearLeastSquaresResult, NonlinearModel, NonlinearNode,
-    NonlinearTermination, RobustLoss,
+    NonlinearTermination, QuadraticOptions, RobustLoss, SqpOptions, SqpResult, SqpTermination,
 };
 
 #[derive(Debug, Clone, Copy, uniffi::Enum)]
@@ -174,6 +174,52 @@ pub struct FfiConstrainedResult {
     pub evaluations: u64,
     pub final_penalty: f64,
     pub termination: FfiConstrainedTermination,
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Record)]
+pub struct FfiSqpOptions {
+    pub max_iterations: u64,
+    pub feasibility_tolerance: f64,
+    pub stationarity_tolerance: f64,
+    pub step_tolerance: f64,
+    pub merit_penalty: f64,
+    pub penalty_increase: f64,
+    pub armijo: f64,
+    pub backtracking: f64,
+    pub max_line_search_iterations: u64,
+    pub hessian_regularization: f64,
+    pub qp_max_iterations: u64,
+    pub qp_rho: f64,
+    pub qp_absolute_tolerance: f64,
+    pub qp_relative_tolerance: f64,
+    pub qp_convexity_tolerance: f64,
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum FfiSqpTermination {
+    Converged,
+    IterationLimit,
+    StepLimit,
+    LineSearchFailed,
+    QpFailure,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiSqpResult {
+    pub point: Vec<f64>,
+    pub objective: f64,
+    pub constraint_values: Vec<f64>,
+    pub multipliers: Vec<FfiConstraintMultiplier>,
+    pub maximum_violation: f64,
+    pub stationarity_norm: f64,
+    pub iterations: u64,
+    pub evaluations: u64,
+    pub accepted_steps: u64,
+    pub rejected_steps: u64,
+    pub final_merit_penalty: f64,
+    pub last_step_norm: f64,
+    pub termination: FfiSqpTermination,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -411,6 +457,81 @@ fn constrained_result(value: ConstrainedResult) -> FfiConstrainedResult {
             ConstrainedTermination::IterationLimit => FfiConstrainedTermination::IterationLimit,
             ConstrainedTermination::PenaltyLimit => FfiConstrainedTermination::PenaltyLimit,
             ConstrainedTermination::Cancelled => FfiConstrainedTermination::Cancelled,
+        },
+    }
+}
+
+#[uniffi::export]
+pub fn solve_sqp(
+    model_value: FfiNonlinearModel,
+    constraints: Vec<FfiNonlinearConstraint>,
+    initial: Vec<f64>,
+    options: FfiSqpOptions,
+) -> Result<FfiSqpResult, FfiError> {
+    let problem = ConstrainedNonlinearProblem {
+        model: model(model_value),
+        constraints: constraints
+            .into_iter()
+            .map(|value| NonlinearConstraint {
+                expression: expression(value.expression),
+                bound: bound(value.bound),
+            })
+            .collect(),
+    };
+    let options = SqpOptions {
+        max_iterations: count(options.max_iterations, "max_iterations")?,
+        feasibility_tolerance: options.feasibility_tolerance,
+        stationarity_tolerance: options.stationarity_tolerance,
+        step_tolerance: options.step_tolerance,
+        merit_penalty: options.merit_penalty,
+        penalty_increase: options.penalty_increase,
+        armijo: options.armijo,
+        backtracking: options.backtracking,
+        max_line_search_iterations: count(
+            options.max_line_search_iterations,
+            "max_line_search_iterations",
+        )?,
+        hessian_regularization: options.hessian_regularization,
+        qp_options: QuadraticOptions {
+            max_iterations: count(options.qp_max_iterations, "qp_max_iterations")?,
+            rho: options.qp_rho,
+            absolute_tolerance: options.qp_absolute_tolerance,
+            relative_tolerance: options.qp_relative_tolerance,
+            convexity_tolerance: options.qp_convexity_tolerance,
+        },
+    };
+    Ok(sqp_result(minimize_sqp(&problem, &initial, options)?))
+}
+
+fn sqp_result(value: SqpResult) -> FfiSqpResult {
+    FfiSqpResult {
+        point: value.point,
+        objective: value.objective,
+        constraint_values: value.constraint_values,
+        multipliers: value
+            .multipliers
+            .into_iter()
+            .map(|multiplier| FfiConstraintMultiplier {
+                lower: multiplier.lower,
+                upper: multiplier.upper,
+                equality: multiplier.equality,
+            })
+            .collect(),
+        maximum_violation: value.maximum_violation,
+        stationarity_norm: value.stationarity_norm,
+        iterations: value.iterations as u64,
+        evaluations: value.evaluations as u64,
+        accepted_steps: value.accepted_steps as u64,
+        rejected_steps: value.rejected_steps as u64,
+        final_merit_penalty: value.final_merit_penalty,
+        last_step_norm: value.last_step_norm,
+        termination: match value.termination {
+            SqpTermination::Converged => FfiSqpTermination::Converged,
+            SqpTermination::IterationLimit => FfiSqpTermination::IterationLimit,
+            SqpTermination::StepLimit => FfiSqpTermination::StepLimit,
+            SqpTermination::LineSearchFailed => FfiSqpTermination::LineSearchFailed,
+            SqpTermination::QpFailure => FfiSqpTermination::QpFailure,
+            SqpTermination::Cancelled => FfiSqpTermination::Cancelled,
         },
     }
 }

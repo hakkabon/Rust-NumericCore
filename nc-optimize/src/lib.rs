@@ -54,6 +54,12 @@ pub use nonlinear_model::{
 pub mod sparse_derivatives;
 pub use sparse_derivatives::{SparseDerivative, SparseJacobian};
 
+pub mod sqp;
+pub use sqp::{
+    minimize_sqp, minimize_sqp_with_observer, SqpIteration, SqpOptions, SqpResult,
+    SqpTermination,
+};
+
 pub mod constrained_nonlinear;
 pub use constrained_nonlinear::{
     minimize_constrained, minimize_constrained_with_observer, ConstrainedIteration,
