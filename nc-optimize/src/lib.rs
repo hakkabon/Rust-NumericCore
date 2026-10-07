@@ -51,6 +51,9 @@ pub use nonlinear_model::{
     DifferentiableValue, NonlinearExpression, NonlinearModel, NonlinearNode,
 };
 
+pub mod sparse_derivatives;
+pub use sparse_derivatives::{SparseDerivative, SparseJacobian};
+
 pub mod constrained_nonlinear;
 pub use constrained_nonlinear::{
     minimize_constrained, minimize_constrained_with_observer, ConstrainedIteration,

@@ -176,6 +176,34 @@ pub struct FfiConstrainedResult {
     pub termination: FfiConstrainedTermination,
 }
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiSparseDerivative {
+    pub dimension: u64,
+    pub indices: Vec<u64>,
+    pub values: Vec<f64>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiSparseJacobian {
+    pub rows: u64,
+    pub columns: u64,
+    pub row_pointers: Vec<u64>,
+    pub column_indices: Vec<u64>,
+    pub values: Vec<f64>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiSparseObjectiveEvaluation {
+    pub value: f64,
+    pub derivative: FfiSparseDerivative,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiSparseResidualEvaluation {
+    pub residuals: Vec<f64>,
+    pub jacobian: FfiSparseJacobian,
+}
+
 fn count(value: u64, name: &str) -> Result<usize, FfiError> {
     usize::try_from(value).map_err(|_| FfiError::SolverError {
         message: format!("{name} does not fit this platform"),
@@ -387,6 +415,86 @@ fn constrained_result(value: ConstrainedResult) -> FfiConstrainedResult {
     }
 }
 
+fn sparse_derivative(value: nc_optimize::SparseDerivative) -> FfiSparseDerivative {
+    FfiSparseDerivative {
+        dimension: value.dimension as u64,
+        indices: value
+            .indices
+            .into_iter()
+            .map(|index| index as u64)
+            .collect(),
+        values: value.values,
+    }
+}
+
+fn sparse_jacobian(value: nc_optimize::SparseJacobian) -> FfiSparseJacobian {
+    FfiSparseJacobian {
+        rows: value.rows as u64,
+        columns: value.columns as u64,
+        row_pointers: value
+            .row_pointers
+            .into_iter()
+            .map(|index| index as u64)
+            .collect(),
+        column_indices: value
+            .column_indices
+            .into_iter()
+            .map(|index| index as u64)
+            .collect(),
+        values: value.values,
+    }
+}
+
+#[uniffi::export]
+pub fn evaluate_nonlinear_objective_sparse(
+    model_value: FfiNonlinearModel,
+    parameters: Vec<f64>,
+) -> Result<FfiSparseObjectiveEvaluation, FfiError> {
+    let model = model(model_value);
+    model.validate()?;
+    let expression = model
+        .objective
+        .as_ref()
+        .ok_or_else(|| FfiError::SolverError {
+            message: "model does not contain an objective".to_owned(),
+        })?;
+    let (value, derivative) = expression.evaluate_sparse(&parameters)?;
+    Ok(FfiSparseObjectiveEvaluation {
+        value,
+        derivative: sparse_derivative(derivative),
+    })
+}
+
+#[uniffi::export]
+pub fn evaluate_nonlinear_residuals_sparse(
+    model_value: FfiNonlinearModel,
+    parameters: Vec<f64>,
+) -> Result<FfiSparseResidualEvaluation, FfiError> {
+    let (residuals, jacobian) = model(model_value).evaluate_sparse_residuals(&parameters)?;
+    Ok(FfiSparseResidualEvaluation {
+        residuals,
+        jacobian: sparse_jacobian(jacobian),
+    })
+}
+
+#[uniffi::export]
+pub fn nonlinear_jacobian_vector_product(
+    model_value: FfiNonlinearModel,
+    parameters: Vec<f64>,
+    direction: Vec<f64>,
+) -> Result<Vec<f64>, FfiError> {
+    Ok(model(model_value).jacobian_vector_product(&parameters, &direction)?)
+}
+
+#[uniffi::export]
+pub fn nonlinear_jacobian_transpose_vector_product(
+    model_value: FfiNonlinearModel,
+    parameters: Vec<f64>,
+    weights: Vec<f64>,
+) -> Result<Vec<f64>, FfiError> {
+    Ok(model(model_value).jacobian_transpose_vector_product(&parameters, &weights)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,5 +568,48 @@ mod tests {
             options(),
         );
         assert!(matches!(result, Err(FfiError::SolverError { .. })));
+    }
+
+    #[test]
+    fn sparse_and_matrix_free_derivatives_cross_transport() {
+        let residual = FfiNonlinearExpression {
+            nodes: vec![
+                node(FfiNonlinearNodeKind::Parameter, 2, 0, 0.0),
+                node(FfiNonlinearNodeKind::Constant, 0, 0, 4.0),
+                node(FfiNonlinearNodeKind::Multiply, 0, 1, 0.0),
+            ],
+            output: 2,
+        };
+        let model = FfiNonlinearModel {
+            parameter_count: 4,
+            bounds: vec![
+                crate::FfiBound {
+                    lower: None,
+                    upper: None,
+                };
+                4
+            ],
+            objective: None,
+            residuals: vec![residual],
+        };
+        let point = vec![1.0, 2.0, 3.0, 4.0];
+        let sparse = evaluate_nonlinear_residuals_sparse(model.clone(), point.clone()).unwrap();
+        assert_eq!(sparse.residuals, vec![12.0]);
+        assert_eq!(sparse.jacobian.row_pointers, vec![0, 1]);
+        assert_eq!(sparse.jacobian.column_indices, vec![2]);
+        assert_eq!(sparse.jacobian.values, vec![4.0]);
+        assert_eq!(
+            nonlinear_jacobian_vector_product(
+                model.clone(),
+                point.clone(),
+                vec![5.0, 6.0, 7.0, 8.0]
+            )
+            .unwrap(),
+            vec![28.0]
+        );
+        assert_eq!(
+            nonlinear_jacobian_transpose_vector_product(model, point, vec![3.0]).unwrap(),
+            vec![0.0, 0.0, 12.0, 0.0]
+        );
     }
 }
