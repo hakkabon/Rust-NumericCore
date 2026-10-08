@@ -133,6 +133,17 @@ pub struct QuadraticResult {
     pub maximum_variable_violation: f64,
 }
 
+impl QuadraticResult {
+    /// Snapshot suitable for a related follow-up QP, retaining both dual blocks.
+    pub fn warm_start(&self) -> QuadraticWarmStart {
+        QuadraticWarmStart {
+            primal: self.point.clone(),
+            row_dual: self.row_dual.clone(),
+            variable_dual: self.variable_dual.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct QuadraticIteration {
     pub iteration: usize,

@@ -697,6 +697,7 @@ pub struct FfiSolution {
 pub struct FfiSimplexOptions {
     pub max_iterations: u64,
     pub tolerance: f64,
+    pub scaling: bool,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -706,12 +707,16 @@ pub struct FfiInteriorPointOptions {
     pub sigma: f64,
     pub big_bound: f64,
     pub step_fraction: f64,
+    pub scaling: bool,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiBranchAndBoundOptions {
     pub max_nodes: u64,
     pub integer_tolerance: f64,
+    pub scaling: bool,
+    /// Empty means no incumbent. Otherwise one value per variable.
+    pub initial_incumbent: Vec<f64>,
 }
 
 /// MILP result plus the search certificate available at termination.
@@ -785,7 +790,9 @@ fn from_domain_solution(solution: nc_optimize::Solution) -> FfiSolution {
 pub fn solve_lp_simplex(problem: FfiProblem) -> Result<FfiSolution, FfiError> {
     use nc_optimize::Solver;
     let domain_problem = to_domain_problem(problem)?;
-    let solution = nc_optimize::RevisedSimplexSolver::default().solve(&domain_problem)?;
+    let solution = nc_optimize::ScaledSolver {
+        inner: nc_optimize::RevisedSimplexSolver::default(), options: Default::default(),
+    }.solve(&domain_problem)?;
     Ok(from_domain_solution(solution))
 }
 
@@ -800,7 +807,12 @@ pub fn solve_lp_simplex_with_options(
         max_iterations: optimization_limit(options.max_iterations, "max_iterations")?,
         tolerance: options.tolerance,
     };
-    Ok(from_domain_solution(solver.solve(&domain_problem)?))
+    let solution = if options.scaling {
+        nc_optimize::ScaledSolver { inner: solver, options: Default::default() }.solve(&domain_problem)?
+    } else {
+        solver.solve(&domain_problem)?
+    };
+    Ok(from_domain_solution(solution))
 }
 
 /// Solves `problem` via `nc_optimize::InteriorPointSolver` (default
@@ -812,7 +824,9 @@ pub fn solve_lp_simplex_with_options(
 pub fn solve_lp_interior_point(problem: FfiProblem) -> Result<FfiSolution, FfiError> {
     use nc_optimize::Solver;
     let domain_problem = to_domain_problem(problem)?;
-    let solution = nc_optimize::InteriorPointSolver::default().solve(&domain_problem)?;
+    let solution = nc_optimize::ScaledSolver {
+        inner: nc_optimize::InteriorPointSolver::default(), options: Default::default(),
+    }.solve(&domain_problem)?;
     Ok(from_domain_solution(solution))
 }
 
@@ -830,7 +844,12 @@ pub fn solve_lp_interior_point_with_options(
         big_bound: options.big_bound,
         step_fraction: options.step_fraction,
     };
-    Ok(from_domain_solution(solver.solve(&domain_problem)?))
+    let solution = if options.scaling {
+        nc_optimize::ScaledSolver { inner: solver, options: Default::default() }.solve(&domain_problem)?
+    } else {
+        solver.solve(&domain_problem)?
+    };
+    Ok(from_domain_solution(solution))
 }
 
 /// Solves `problem` via `nc_optimize::BranchAndBoundSolver` (default
@@ -844,9 +863,10 @@ pub fn solve_lp_interior_point_with_options(
 /// valid (if pointless) call.
 #[uniffi::export]
 pub fn solve_milp_branch_and_bound(problem: FfiProblem) -> Result<FfiSolution, FfiError> {
-    use nc_optimize::Solver;
     let domain_problem = to_domain_problem(problem)?;
-    let solution = nc_optimize::BranchAndBoundSolver::default().solve(&domain_problem)?;
+    let scaled = nc_optimize::ScaledProblem::new(&domain_problem, Default::default())?;
+    let report = nc_optimize::BranchAndBoundSolver::default().solve_with_report(&scaled.problem)?;
+    let solution = scaled.restore(report.solution, &domain_problem);
     Ok(from_domain_solution(solution))
 }
 
@@ -864,7 +884,22 @@ pub fn solve_milp_branch_and_bound_with_options(
         node_selection: nc_optimize::NodeSelection::BestBound,
         relaxation_solver: Box::new(nc_optimize::RevisedSimplexSolver::default()),
     };
-    let report = solver.solve_with_report(&domain_problem)?;
+    let scaled = options.scaling.then(|| nc_optimize::ScaledProblem::new(
+        &domain_problem, Default::default()
+    )).transpose()?;
+    let solve_problem = scaled.as_ref().map_or(&domain_problem, |value| &value.problem);
+    let incumbent = if options.initial_incumbent.is_empty() {
+        None
+    } else if let Some(ref scaled_problem) = scaled {
+        Some(options.initial_incumbent.iter().zip(&scaled_problem.report.variable_factors)
+            .map(|(value, factor)| value / factor).collect::<Vec<_>>())
+    } else {
+        Some(options.initial_incumbent)
+    };
+    let mut report = solver.solve_with_report_warm(solve_problem, incumbent.as_deref())?;
+    if let Some(ref scaled_problem) = scaled {
+        report.solution = scaled_problem.restore(report.solution, &domain_problem);
+    }
     Ok(FfiMilpSolveResult {
         solution: from_domain_solution(report.solution),
         nodes_explored: report.nodes_explored as u64,
@@ -1412,7 +1447,10 @@ mod tests {
         };
         let report = solve_milp_branch_and_bound_with_options(
             problem,
-            FfiBranchAndBoundOptions { max_nodes: 10, integer_tolerance: 1e-8 },
+            FfiBranchAndBoundOptions {
+                max_nodes: 10, integer_tolerance: 1e-8,
+                scaling: true, initial_incumbent: vec![],
+            },
         ).unwrap();
         assert_eq!(report.solution.status, FfiSolveStatus::Optimal);
         assert_eq!(report.solution.variable_values, vec![3.0]);

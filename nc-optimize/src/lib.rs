@@ -74,6 +74,9 @@ pub use quadratic_program::{
     QuadraticTermination, QuadraticWarmStart,
 };
 
+pub mod scaling;
+pub use scaling::{ScaledProblem, ScaledSolver, ScalingOptions, ScalingReport};
+
 /// Bound on a variable or constraint. `None` means unbounded in that
 /// direction (`-inf` / `+inf`).
 #[derive(Debug, Clone, Copy, PartialEq)]

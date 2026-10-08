@@ -172,6 +172,16 @@ impl BranchAndBoundSolver {
         &self,
         problem: &Problem,
     ) -> Result<BranchAndBoundReport, OptimizeError> {
+        self.solve_with_report_warm(problem, None)
+    }
+
+    /// Solve with an optional integer-feasible incumbent. The incumbent is
+    /// independently validated before it is allowed to prune any node.
+    pub fn solve_with_report_warm(
+        &self,
+        problem: &Problem,
+        initial_incumbent: Option<&[f64]>,
+    ) -> Result<BranchAndBoundReport, OptimizeError> {
         problem.validate()?;
         if self.max_nodes == 0
             || !self.integer_tolerance.is_finite()
@@ -198,7 +208,10 @@ impl BranchAndBoundSolver {
         let mut frontier = vec![NodeBounds {
             var_bounds: problem.var_bounds.clone(), lower_bound: None, depth: 0,
         }];
-        let mut incumbent: Option<Solution> = None;
+        let mut incumbent = match initial_incumbent {
+            Some(values) => Some(validated_incumbent(problem, values, self.integer_tolerance)?),
+            None => None,
+        };
         let mut nodes_explored = 0usize;
         let mut statistics = SearchStatistics::default();
         let mut search_incomplete = false;
@@ -334,6 +347,28 @@ impl BranchAndBoundSolver {
             }, nodes_explored, None, statistics, BranchAndBoundTermination::Exhausted)),
         }
     }
+}
+
+fn validated_incumbent(
+    problem: &Problem,
+    values: &[f64],
+    tolerance: f64,
+) -> Result<Solution, OptimizeError> {
+    if values.len() != problem.objective.len() || !values.iter().all(|v| v.is_finite()) {
+        return Err(OptimizeError::InvalidConfiguration(
+            "MILP warm start must contain one finite value per variable",
+        ));
+    }
+    let objective_value = problem.objective.iter().zip(values).map(|(c, x)| c * x).sum();
+    let solution = Solution {
+        variable_values: values.to_vec(), objective_value, status: SolveStatus::Optimal,
+    };
+    if !solution.diagnostics(problem).is_verified(tolerance) {
+        return Err(OptimizeError::InvalidConfiguration(
+            "MILP warm start must be feasible and integer within integer_tolerance",
+        ));
+    }
+    Ok(solution)
 }
 
 #[derive(Default, Clone, Copy)]
@@ -656,5 +691,30 @@ mod tests {
         assert_eq!(report.termination, BranchAndBoundTermination::Exhausted);
         assert!(report.nodes_pruned_infeasible >= 2);
         assert_eq!(report.maximum_depth, 1);
+    }
+
+    #[test]
+    fn feasible_warm_incumbent_is_used_at_a_node_limit() {
+        let problem = dense_problem(
+            vec![-5.0, -4.0], vec![vec![6.0, 4.0], vec![1.0, 2.0]],
+            vec![Bound { lower: None, upper: Some(24.0) }, Bound { lower: None, upper: Some(6.0) }],
+            vec![Bound { lower: Some(0.0), upper: None }, Bound { lower: Some(0.0), upper: None }],
+            vec![true, true],
+        );
+        let solver = BranchAndBoundSolver { max_nodes: 1, ..Default::default() };
+        let report = solver.solve_with_report_warm(&problem, Some(&[4.0, 0.0])).unwrap();
+        assert_eq!(report.solution.status, SolveStatus::IterationLimit);
+        assert_eq!(report.solution.variable_values, vec![4.0, 0.0]);
+        assert_eq!(report.solution.objective_value, -20.0);
+    }
+
+    #[test]
+    fn infeasible_warm_incumbent_is_rejected() {
+        let problem = dense_problem(
+            vec![-1.0], vec![vec![1.0]], vec![Bound { lower: None, upper: Some(1.0) }],
+            vec![Bound { lower: Some(0.0), upper: None }], vec![true],
+        );
+        let result = BranchAndBoundSolver::default().solve_with_report_warm(&problem, Some(&[2.0]));
+        assert!(matches!(result, Err(OptimizeError::InvalidConfiguration(_))));
     }
 }
