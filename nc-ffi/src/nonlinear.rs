@@ -5,11 +5,14 @@
 
 use crate::FfiError;
 use nc_optimize::{
-    minimize_constrained, minimize_model_lbfgsb, minimize_sqp, solve_model_least_squares, Bound,
+    minimize_constrained, minimize_model_lbfgsb, minimize_nonlinear_interior_point, minimize_sqp,
+    solve_model_least_squares, Bound,
     ConstrainedNonlinearProblem, ConstrainedOptions, ConstrainedResult, ConstrainedTermination,
     ConstraintMultiplier, LbfgsOptions, LbfgsResult, NonlinearConstraint, NonlinearExpression,
-    NonlinearLeastSquaresOptions, NonlinearLeastSquaresResult, NonlinearModel, NonlinearNode,
-    NonlinearTermination, QuadraticOptions, RobustLoss, SqpOptions, SqpResult, SqpTermination,
+    NonlinearInteriorPointOptions, NonlinearInteriorPointResult,
+    NonlinearInteriorPointTermination, NonlinearLeastSquaresOptions,
+    NonlinearLeastSquaresResult, NonlinearModel, NonlinearNode, NonlinearTermination,
+    QuadraticOptions, RobustLoss, SqpOptions, SqpResult, SqpTermination,
 };
 
 #[derive(Debug, Clone, Copy, uniffi::Enum)]
@@ -174,6 +177,51 @@ pub struct FfiConstrainedResult {
     pub evaluations: u64,
     pub final_penalty: f64,
     pub termination: FfiConstrainedTermination,
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Record)]
+pub struct FfiNonlinearInteriorPointOptions {
+    pub max_outer_iterations: u64,
+    pub max_inner_iterations: u64,
+    pub feasibility_tolerance: f64,
+    pub stationarity_tolerance: f64,
+    pub complementarity_tolerance: f64,
+    pub initial_barrier: f64,
+    pub barrier_reduction: f64,
+    pub minimum_barrier: f64,
+    pub equality_penalty: f64,
+    pub armijo: f64,
+    pub backtracking: f64,
+    pub fraction_to_boundary: f64,
+    pub max_line_search_iterations: u64,
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum FfiNonlinearInteriorPointTermination {
+    Converged,
+    IterationLimit,
+    InfeasibleStart,
+    LineSearchFailed,
+    NumericalFailure,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiNonlinearInteriorPointResult {
+    pub point: Vec<f64>,
+    pub objective: f64,
+    pub constraint_values: Vec<f64>,
+    pub multipliers: Vec<FfiConstraintMultiplier>,
+    pub maximum_violation: f64,
+    pub stationarity_norm: f64,
+    pub complementarity: f64,
+    pub outer_iterations: u64,
+    pub inner_iterations: u64,
+    pub evaluations: u64,
+    pub final_barrier: f64,
+    pub accepted_steps: u64,
+    pub rejected_steps: u64,
+    pub termination: FfiNonlinearInteriorPointTermination,
 }
 
 #[derive(Debug, Clone, Copy, uniffi::Record)]
@@ -457,6 +505,66 @@ fn constrained_result(value: ConstrainedResult) -> FfiConstrainedResult {
             ConstrainedTermination::IterationLimit => FfiConstrainedTermination::IterationLimit,
             ConstrainedTermination::PenaltyLimit => FfiConstrainedTermination::PenaltyLimit,
             ConstrainedTermination::Cancelled => FfiConstrainedTermination::Cancelled,
+        },
+    }
+}
+
+#[uniffi::export]
+pub fn solve_nonlinear_interior_point(
+    model_value: FfiNonlinearModel,
+    constraints: Vec<FfiNonlinearConstraint>,
+    initial: Vec<f64>,
+    options: FfiNonlinearInteriorPointOptions,
+) -> Result<FfiNonlinearInteriorPointResult, FfiError> {
+    let problem = ConstrainedNonlinearProblem {
+        model: model(model_value),
+        constraints: constraints.into_iter().map(|value| NonlinearConstraint {
+            expression: expression(value.expression), bound: bound(value.bound),
+        }).collect(),
+    };
+    let options = NonlinearInteriorPointOptions {
+        max_outer_iterations: count(options.max_outer_iterations, "max_outer_iterations")?,
+        max_inner_iterations: count(options.max_inner_iterations, "max_inner_iterations")?,
+        feasibility_tolerance: options.feasibility_tolerance,
+        stationarity_tolerance: options.stationarity_tolerance,
+        complementarity_tolerance: options.complementarity_tolerance,
+        initial_barrier: options.initial_barrier,
+        barrier_reduction: options.barrier_reduction,
+        minimum_barrier: options.minimum_barrier,
+        equality_penalty: options.equality_penalty,
+        armijo: options.armijo,
+        backtracking: options.backtracking,
+        fraction_to_boundary: options.fraction_to_boundary,
+        max_line_search_iterations: count(
+            options.max_line_search_iterations, "max_line_search_iterations")?,
+    };
+    Ok(interior_point_result(minimize_nonlinear_interior_point(
+        &problem, &initial, options)?))
+}
+
+fn interior_point_result(value: NonlinearInteriorPointResult) -> FfiNonlinearInteriorPointResult {
+    FfiNonlinearInteriorPointResult {
+        point: value.point, objective: value.objective,
+        constraint_values: value.constraint_values,
+        multipliers: value.multipliers.into_iter().map(|multiplier| FfiConstraintMultiplier {
+            lower: multiplier.lower, upper: multiplier.upper, equality: multiplier.equality,
+        }).collect(),
+        maximum_violation: value.maximum_violation,
+        stationarity_norm: value.stationarity_norm,
+        complementarity: value.complementarity,
+        outer_iterations: value.outer_iterations as u64,
+        inner_iterations: value.inner_iterations as u64,
+        evaluations: value.evaluations as u64,
+        final_barrier: value.final_barrier,
+        accepted_steps: value.accepted_steps as u64,
+        rejected_steps: value.rejected_steps as u64,
+        termination: match value.termination {
+            NonlinearInteriorPointTermination::Converged => FfiNonlinearInteriorPointTermination::Converged,
+            NonlinearInteriorPointTermination::IterationLimit => FfiNonlinearInteriorPointTermination::IterationLimit,
+            NonlinearInteriorPointTermination::InfeasibleStart => FfiNonlinearInteriorPointTermination::InfeasibleStart,
+            NonlinearInteriorPointTermination::LineSearchFailed => FfiNonlinearInteriorPointTermination::LineSearchFailed,
+            NonlinearInteriorPointTermination::NumericalFailure => FfiNonlinearInteriorPointTermination::NumericalFailure,
+            NonlinearInteriorPointTermination::Cancelled => FfiNonlinearInteriorPointTermination::Cancelled,
         },
     }
 }

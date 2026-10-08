@@ -68,6 +68,13 @@ pub use constrained_nonlinear::{
     ConstraintMultiplier, NonlinearConstraint,
 };
 
+pub mod nonlinear_interior_point;
+pub use nonlinear_interior_point::{
+    minimize_nonlinear_interior_point, minimize_nonlinear_interior_point_with_observer,
+    NonlinearInteriorPointIteration, NonlinearInteriorPointOptions,
+    NonlinearInteriorPointResult, NonlinearInteriorPointTermination,
+};
+
 pub mod quadratic_program;
 pub use quadratic_program::{
     solve_convex_qp, solve_convex_qp_warm, solve_convex_qp_with_observer,
