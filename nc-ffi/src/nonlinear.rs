@@ -5,14 +5,15 @@
 
 use crate::FfiError;
 use nc_optimize::{
-    minimize_constrained, minimize_model_lbfgsb, minimize_nonlinear_interior_point, minimize_sqp,
-    solve_model_least_squares, Bound,
+    minimize_constrained, minimize_mixed_integer_nonlinear, minimize_model_lbfgsb,
+    minimize_nonlinear_interior_point, minimize_sqp, solve_model_least_squares, Bound,
     ConstrainedNonlinearProblem, ConstrainedOptions, ConstrainedResult, ConstrainedTermination,
-    ConstraintMultiplier, LbfgsOptions, LbfgsResult, NonlinearConstraint, NonlinearExpression,
-    NonlinearInteriorPointOptions, NonlinearInteriorPointResult,
-    NonlinearInteriorPointTermination, NonlinearLeastSquaresOptions,
-    NonlinearLeastSquaresResult, NonlinearModel, NonlinearNode, NonlinearTermination,
-    QuadraticOptions, RobustLoss, SqpOptions, SqpResult, SqpTermination,
+    ConstraintMultiplier, LbfgsOptions, LbfgsResult, MixedIntegerNonlinearOptions,
+    MixedIntegerNonlinearProblem, MixedIntegerNonlinearResult, MixedIntegerNonlinearTermination,
+    NonlinearConstraint, NonlinearExpression, NonlinearInteriorPointOptions,
+    NonlinearInteriorPointResult, NonlinearInteriorPointTermination, NonlinearLeastSquaresOptions,
+    NonlinearLeastSquaresResult, NonlinearModel, NonlinearNode, NonlinearRelaxationStrategy,
+    NonlinearTermination, QuadraticOptions, RobustLoss, SqpOptions, SqpResult, SqpTermination,
 };
 
 #[derive(Debug, Clone, Copy, uniffi::Enum)]
@@ -222,6 +223,52 @@ pub struct FfiNonlinearInteriorPointResult {
     pub accepted_steps: u64,
     pub rejected_steps: u64,
     pub termination: FfiNonlinearInteriorPointTermination,
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum FfiNonlinearRelaxationStrategy {
+    Sqp,
+    AugmentedLagrangian,
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Record)]
+pub struct FfiMixedIntegerNonlinearOptions {
+    pub max_nodes: u64,
+    pub integer_tolerance: f64,
+    pub feasibility_tolerance: f64,
+    pub absolute_gap_tolerance: f64,
+    pub relative_gap_tolerance: f64,
+    pub relaxation_strategy: FfiNonlinearRelaxationStrategy,
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum FfiMixedIntegerNonlinearTermination {
+    SearchExhausted,
+    LocalGapLimit,
+    NodeLimit,
+    Infeasible,
+    RelaxationFailure,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiMixedIntegerNonlinearResult {
+    pub point: Vec<f64>,
+    pub objective: f64,
+    pub constraint_values: Vec<f64>,
+    pub multipliers: Vec<FfiConstraintMultiplier>,
+    pub maximum_violation: f64,
+    pub stationarity_norm: f64,
+    pub nodes_explored: u64,
+    pub relaxations_solved: u64,
+    pub nodes_pruned_infeasible: u64,
+    pub maximum_depth: u64,
+    pub incumbents_found: u64,
+    pub best_relaxation_objective: Option<f64>,
+    pub absolute_gap: Option<f64>,
+    pub relative_gap: Option<f64>,
+    pub global_optimality_certified: bool,
+    pub termination: FfiMixedIntegerNonlinearTermination,
 }
 
 #[derive(Debug, Clone, Copy, uniffi::Record)]
@@ -518,9 +565,13 @@ pub fn solve_nonlinear_interior_point(
 ) -> Result<FfiNonlinearInteriorPointResult, FfiError> {
     let problem = ConstrainedNonlinearProblem {
         model: model(model_value),
-        constraints: constraints.into_iter().map(|value| NonlinearConstraint {
-            expression: expression(value.expression), bound: bound(value.bound),
-        }).collect(),
+        constraints: constraints
+            .into_iter()
+            .map(|value| NonlinearConstraint {
+                expression: expression(value.expression),
+                bound: bound(value.bound),
+            })
+            .collect(),
     };
     let options = NonlinearInteriorPointOptions {
         max_outer_iterations: count(options.max_outer_iterations, "max_outer_iterations")?,
@@ -536,19 +587,29 @@ pub fn solve_nonlinear_interior_point(
         backtracking: options.backtracking,
         fraction_to_boundary: options.fraction_to_boundary,
         max_line_search_iterations: count(
-            options.max_line_search_iterations, "max_line_search_iterations")?,
+            options.max_line_search_iterations,
+            "max_line_search_iterations",
+        )?,
     };
     Ok(interior_point_result(minimize_nonlinear_interior_point(
-        &problem, &initial, options)?))
+        &problem, &initial, options,
+    )?))
 }
 
 fn interior_point_result(value: NonlinearInteriorPointResult) -> FfiNonlinearInteriorPointResult {
     FfiNonlinearInteriorPointResult {
-        point: value.point, objective: value.objective,
+        point: value.point,
+        objective: value.objective,
         constraint_values: value.constraint_values,
-        multipliers: value.multipliers.into_iter().map(|multiplier| FfiConstraintMultiplier {
-            lower: multiplier.lower, upper: multiplier.upper, equality: multiplier.equality,
-        }).collect(),
+        multipliers: value
+            .multipliers
+            .into_iter()
+            .map(|multiplier| FfiConstraintMultiplier {
+                lower: multiplier.lower,
+                upper: multiplier.upper,
+                equality: multiplier.equality,
+            })
+            .collect(),
         maximum_violation: value.maximum_violation,
         stationarity_norm: value.stationarity_norm,
         complementarity: value.complementarity,
@@ -559,12 +620,115 @@ fn interior_point_result(value: NonlinearInteriorPointResult) -> FfiNonlinearInt
         accepted_steps: value.accepted_steps as u64,
         rejected_steps: value.rejected_steps as u64,
         termination: match value.termination {
-            NonlinearInteriorPointTermination::Converged => FfiNonlinearInteriorPointTermination::Converged,
-            NonlinearInteriorPointTermination::IterationLimit => FfiNonlinearInteriorPointTermination::IterationLimit,
-            NonlinearInteriorPointTermination::InfeasibleStart => FfiNonlinearInteriorPointTermination::InfeasibleStart,
-            NonlinearInteriorPointTermination::LineSearchFailed => FfiNonlinearInteriorPointTermination::LineSearchFailed,
-            NonlinearInteriorPointTermination::NumericalFailure => FfiNonlinearInteriorPointTermination::NumericalFailure,
-            NonlinearInteriorPointTermination::Cancelled => FfiNonlinearInteriorPointTermination::Cancelled,
+            NonlinearInteriorPointTermination::Converged => {
+                FfiNonlinearInteriorPointTermination::Converged
+            }
+            NonlinearInteriorPointTermination::IterationLimit => {
+                FfiNonlinearInteriorPointTermination::IterationLimit
+            }
+            NonlinearInteriorPointTermination::InfeasibleStart => {
+                FfiNonlinearInteriorPointTermination::InfeasibleStart
+            }
+            NonlinearInteriorPointTermination::LineSearchFailed => {
+                FfiNonlinearInteriorPointTermination::LineSearchFailed
+            }
+            NonlinearInteriorPointTermination::NumericalFailure => {
+                FfiNonlinearInteriorPointTermination::NumericalFailure
+            }
+            NonlinearInteriorPointTermination::Cancelled => {
+                FfiNonlinearInteriorPointTermination::Cancelled
+            }
+        },
+    }
+}
+
+#[uniffi::export]
+pub fn solve_mixed_integer_nonlinear(
+    model_value: FfiNonlinearModel,
+    constraints: Vec<FfiNonlinearConstraint>,
+    is_integer: Vec<bool>,
+    initial: Vec<f64>,
+    options: FfiMixedIntegerNonlinearOptions,
+) -> Result<FfiMixedIntegerNonlinearResult, FfiError> {
+    let problem = MixedIntegerNonlinearProblem {
+        model: model(model_value),
+        constraints: constraints
+            .into_iter()
+            .map(|value| NonlinearConstraint {
+                expression: expression(value.expression),
+                bound: bound(value.bound),
+            })
+            .collect(),
+        is_integer,
+    };
+    let strategy = match options.relaxation_strategy {
+        FfiNonlinearRelaxationStrategy::Sqp => NonlinearRelaxationStrategy::Sqp,
+        FfiNonlinearRelaxationStrategy::AugmentedLagrangian => {
+            NonlinearRelaxationStrategy::AugmentedLagrangian
+        }
+    };
+    let value = minimize_mixed_integer_nonlinear(
+        &problem,
+        &initial,
+        MixedIntegerNonlinearOptions {
+            max_nodes: count(options.max_nodes, "max_nodes")?,
+            integer_tolerance: options.integer_tolerance,
+            feasibility_tolerance: options.feasibility_tolerance,
+            absolute_gap_tolerance: options.absolute_gap_tolerance,
+            relative_gap_tolerance: options.relative_gap_tolerance,
+            relaxation_strategy: strategy,
+            ..MixedIntegerNonlinearOptions::default()
+        },
+    )?;
+    Ok(mixed_integer_nonlinear_result(value))
+}
+
+fn mixed_integer_nonlinear_result(
+    value: MixedIntegerNonlinearResult,
+) -> FfiMixedIntegerNonlinearResult {
+    FfiMixedIntegerNonlinearResult {
+        point: value.point,
+        objective: value.objective,
+        constraint_values: value.constraint_values,
+        multipliers: value
+            .multipliers
+            .into_iter()
+            .map(|multiplier| FfiConstraintMultiplier {
+                lower: multiplier.lower,
+                upper: multiplier.upper,
+                equality: multiplier.equality,
+            })
+            .collect(),
+        maximum_violation: value.maximum_violation,
+        stationarity_norm: value.stationarity_norm,
+        nodes_explored: value.nodes_explored as u64,
+        relaxations_solved: value.relaxations_solved as u64,
+        nodes_pruned_infeasible: value.nodes_pruned_infeasible as u64,
+        maximum_depth: value.maximum_depth as u64,
+        incumbents_found: value.incumbents_found as u64,
+        best_relaxation_objective: value.best_relaxation_objective,
+        absolute_gap: value.absolute_gap,
+        relative_gap: value.relative_gap,
+        global_optimality_certified: value.global_optimality_certified,
+        termination: match value.termination {
+            MixedIntegerNonlinearTermination::SearchExhausted => {
+                FfiMixedIntegerNonlinearTermination::SearchExhausted
+            }
+            MixedIntegerNonlinearTermination::LocalGapLimit => {
+                FfiMixedIntegerNonlinearTermination::LocalGapLimit
+            }
+            MixedIntegerNonlinearTermination::NodeLimit => {
+                FfiMixedIntegerNonlinearTermination::NodeLimit
+            }
+            MixedIntegerNonlinearTermination::Infeasible => {
+                FfiMixedIntegerNonlinearTermination::Infeasible
+            }
+            MixedIntegerNonlinearTermination::RelaxationFailure => {
+                FfiMixedIntegerNonlinearTermination::RelaxationFailure
+            }
+            MixedIntegerNonlinearTermination::Cancelled => {
+                FfiMixedIntegerNonlinearTermination::Cancelled
+            }
         },
     }
 }

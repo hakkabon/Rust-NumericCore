@@ -28,7 +28,7 @@ Rust-NumericCore/
 ├── nc-sparse/            # CSR operations; sparse LU/Cholesky; ILU(0)/IC(0) factors
 ├── nc-decomp/            # portable dense Cholesky and Householder-QR least-squares solves
 ├── nc-iterative/         # CG/BiCGSTAB/GMRES with Jacobi, ILU(0), or IC(0); CGLS statistics
-├── nc-optimize/          # LP/MILP/QP; L-BFGS/LM/SQP/interior point; nonlinear derivatives
+├── nc-optimize/          # LP/MILP/MINLP/QP; specialized smooth nonlinear methods and derivatives
 ├── nc-ffi/               # UniFFI surface — kernels, solvers, nonlinear models and derivative products
 ├── nc-bench/             # Criterion benchmarks (needs a newer cargo than 1.75 for its deps)
 ├── scripts/

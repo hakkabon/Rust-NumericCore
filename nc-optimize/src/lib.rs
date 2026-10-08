@@ -75,6 +75,13 @@ pub use nonlinear_interior_point::{
     NonlinearInteriorPointResult, NonlinearInteriorPointTermination,
 };
 
+pub mod mixed_integer_nonlinear;
+pub use mixed_integer_nonlinear::{
+    minimize_mixed_integer_nonlinear, minimize_mixed_integer_nonlinear_with_observer,
+    MixedIntegerNonlinearIteration, MixedIntegerNonlinearOptions, MixedIntegerNonlinearProblem,
+    MixedIntegerNonlinearResult, MixedIntegerNonlinearTermination, NonlinearRelaxationStrategy,
+};
+
 pub mod quadratic_program;
 pub use quadratic_program::{
     solve_convex_qp, solve_convex_qp_warm, solve_convex_qp_with_observer,

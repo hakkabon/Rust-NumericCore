@@ -13,5 +13,5 @@ Rust SQP export. Unconstrained models use the existing bounded objective solve.
 
 This phase intentionally requires no new Rust ABI. Its cross-codebase value is
 the completed vertical path from AMPL text through the shared graph and UniFFI
-to the Rust nonlinear solvers. MINLP, indexed modeling constructs, nonsmooth
+to the Rust nonlinear solvers. Certified global MINLP, indexed modeling constructs, nonsmooth
 operators, and user-defined functions remain future work.
