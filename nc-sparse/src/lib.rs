@@ -15,6 +15,12 @@
 use thiserror::Error;
 use std::collections::BTreeMap;
 
+mod direct;
+pub use direct::{
+    IncompleteCholesky, Ilu0, SparseCholesky, SparseDirectError,
+    SparseDirectReport, SparseLu,
+};
+
 #[derive(Debug, Error)]
 pub enum SparseError {
     #[error("row_ptr length {actual} does not match rows+1 ({expected})")]

@@ -98,6 +98,18 @@ impl From<nc_sparse::SparseError> for FfiError {
     }
 }
 
+impl From<nc_sparse::SparseDirectError> for FfiError {
+    fn from(err: nc_sparse::SparseDirectError) -> Self {
+        match err {
+            nc_sparse::SparseDirectError::NonSquare { .. }
+            | nc_sparse::SparseDirectError::RightHandSideLength { .. } => {
+                FfiError::DimensionMismatch { message: err.to_string() }
+            }
+            _ => FfiError::SolverError { message: err.to_string() },
+        }
+    }
+}
+
 impl From<nc_optimize::OptimizeError> for FfiError {
     fn from(err: nc_optimize::OptimizeError) -> Self {
         FfiError::SolverError { message: err.to_string() }
@@ -203,6 +215,8 @@ fn from_csr_f64(matrix: CsrMatrix<f64>) -> FfiCsrMatrixF64 {
 pub enum FfiLinearPreconditioner {
     None,
     Jacobi,
+    Ilu0,
+    IncompleteCholesky,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -237,8 +251,29 @@ fn linear_options(options: FfiLinearSolveOptions) -> Result<nc_iterative::Linear
         preconditioner: match options.preconditioner {
             FfiLinearPreconditioner::None => nc_iterative::LinearPreconditioner::None,
             FfiLinearPreconditioner::Jacobi => nc_iterative::LinearPreconditioner::Jacobi,
+            FfiLinearPreconditioner::Ilu0 => nc_iterative::LinearPreconditioner::Ilu0,
+            FfiLinearPreconditioner::IncompleteCholesky => {
+                nc_iterative::LinearPreconditioner::IncompleteCholesky
+            }
         },
     })
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiSparseDirectResult {
+    pub solution: Vec<f64>,
+    pub residual_norm: f64,
+    pub relative_residual: f64,
+    pub factor_nonzeros: u64,
+}
+
+fn from_sparse_direct(result: nc_sparse::SparseDirectReport) -> FfiSparseDirectResult {
+    FfiSparseDirectResult {
+        solution: result.solution,
+        residual_norm: result.residual_norm,
+        relative_residual: result.relative_residual,
+        factor_nonzeros: result.factor_nonzeros as u64,
+    }
 }
 
 fn from_linear_solve(result: nc_iterative::LinearSolveReport) -> FfiLinearSolveResult {
@@ -487,6 +522,27 @@ pub fn solve_sparse_gmres(
         statistical_iteration_limit(restart)?,
     )?;
     Ok(from_linear_solve(result))
+}
+
+/// Factor and solve a general square CSR system with sparse pivoted LU.
+#[uniffi::export]
+pub fn solve_sparse_lu(
+    matrix: FfiCsrMatrixF64, rhs: Vec<f64>, drop_tolerance: f64,
+) -> Result<FfiSparseDirectResult, FfiError> {
+    let matrix = to_csr_f64(matrix)?;
+    let factor = nc_sparse::SparseLu::factor(&matrix, drop_tolerance)?;
+    Ok(from_sparse_direct(factor.solve_report(&matrix, &rhs)?))
+}
+
+/// Factor and solve a symmetric positive-definite CSR system with sparse
+/// Cholesky. Symmetry and positive pivots are checked explicitly.
+#[uniffi::export]
+pub fn solve_sparse_cholesky(
+    matrix: FfiCsrMatrixF64, rhs: Vec<f64>, drop_tolerance: f64,
+) -> Result<FfiSparseDirectResult, FfiError> {
+    let matrix = to_csr_f64(matrix)?;
+    let factor = nc_sparse::SparseCholesky::factor(&matrix, drop_tolerance)?;
+    Ok(from_sparse_direct(factor.solve_report(&matrix, &rhs)?))
 }
 
 /// The `f32` counterpart of `spmv_f64`.
@@ -1002,6 +1058,26 @@ mod tests {
             }, 2,
         ).unwrap();
         assert_eq!(gmres.termination, FfiIterativeTermination::Converged);
+    }
+
+    #[test]
+    fn sparse_direct_and_factor_preconditioners_cross_ffi() {
+        let matrix = FfiCsrMatrixF64 {
+            rows: 3, cols: 3, row_ptr: vec![0, 2, 5, 7],
+            col_indices: vec![0, 1, 0, 1, 2, 1, 2],
+            values: vec![4.0, 1.0, 1.0, 3.0, 1.0, 1.0, 2.0],
+        };
+        let rhs = vec![6.0, 10.0, 8.0];
+        let lu = solve_sparse_lu(matrix.clone(), rhs.clone(), 0.0).unwrap();
+        let cholesky = solve_sparse_cholesky(matrix.clone(), rhs.clone(), 0.0).unwrap();
+        assert!(lu.relative_residual < 1e-12);
+        assert!(cholesky.relative_residual < 1e-12);
+        let cg = solve_sparse_conjugate_gradient(matrix, rhs, FfiLinearSolveOptions {
+            max_iterations: 20, tolerance: 1e-12, initial_solution: None,
+            preconditioner: FfiLinearPreconditioner::IncompleteCholesky,
+        }).unwrap();
+        assert_eq!(cg.termination, FfiIterativeTermination::Converged);
+        assert_eq!(cg.iterations, 1);
     }
 
     #[test]

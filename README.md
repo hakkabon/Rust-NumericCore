@@ -25,9 +25,9 @@ Rust-NumericCore/
 ├── nc-core/              # strides, shape, dtype — no numerics
 ├── nc-kernels-generic/   # pure-Rust fallback kernels (matmul, axpy, dot, norm) — implemented
 ├── nc-kernels-simd/      # SIMD kernels (scaffold; nightly-gated)
-├── nc-sparse/            # validated CSR sparse matrices + SpMV / transpose-SpMV — implemented
+├── nc-sparse/            # CSR operations; sparse LU/Cholesky; ILU(0)/IC(0) factors
 ├── nc-decomp/            # portable dense Cholesky and Householder-QR least-squares solves
-├── nc-iterative/         # preconditioned CG/BiCGSTAB/restarted GMRES plus CGLS sparse statistics
+├── nc-iterative/         # CG/BiCGSTAB/GMRES with Jacobi, ILU(0), or IC(0); CGLS statistics
 ├── nc-optimize/          # LP/MILP/QP; L-BFGS/LM/SQP; sparse/matrix-free nonlinear derivatives
 ├── nc-ffi/               # UniFFI surface — kernels, solvers, nonlinear models and derivative products
 ├── nc-bench/             # Criterion benchmarks (needs a newer cargo than 1.75 for its deps)

@@ -53,6 +53,10 @@ jobs:
           BINDINGS=target/xcframework/bindings/nc_ffi.swift
           grep -q 'solveSparseWeightedLeastSquares' "${BINDINGS}"
           grep -q 'solveSparsePenalizedWeightedLeastSquares' "${BINDINGS}"
+          grep -q 'solveSparseLu' "${BINDINGS}"
+          grep -q 'solveSparseCholesky' "${BINDINGS}"
+          grep -q 'case ilu0' "${BINDINGS}"
+          grep -q 'case incompleteCholesky' "${BINDINGS}"
 
       - name: Compute checksum
         id: checksum

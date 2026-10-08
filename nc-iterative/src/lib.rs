@@ -400,6 +400,8 @@ pub enum LinearPreconditioner {
     None,
     #[default]
     Jacobi,
+    Ilu0,
+    IncompleteCholesky,
 }
 
 #[derive(Debug, Clone)]
@@ -446,6 +448,10 @@ pub enum IterativeSolveError {
     InvalidConvergenceSettings,
     #[error("matrix, right-hand side, and initial solution must be finite")]
     InvalidNumericInput,
+    #[error("preconditioner {preconditioner:?} is not compatible with {solver}")]
+    IncompatiblePreconditioner { solver: &'static str, preconditioner: LinearPreconditioner },
+    #[error(transparent)]
+    Preconditioner(#[from] nc_sparse::SparseDirectError),
     #[error(transparent)]
     Sparse(#[from] nc_sparse::SparseError),
 }
@@ -463,8 +469,13 @@ pub fn conjugate_gradient_with_options(
     if residual_ratio(&residual, rhs_norm) <= options.tolerance {
         return Ok(linear_report(solution, 0, &residual, rhs_norm, IterativeTermination::Converged));
     }
-    let inverse_diagonal = linear_inverse_diagonal(matrix, options.preconditioner);
-    let mut z = apply_linear_preconditioner(&residual, inverse_diagonal.as_deref());
+    if options.preconditioner == LinearPreconditioner::Ilu0 {
+        return Err(IterativeSolveError::IncompatiblePreconditioner {
+            solver: "conjugate gradient", preconditioner: options.preconditioner,
+        });
+    }
+    let preconditioner = BuiltPreconditioner::factor(matrix, options.preconditioner)?;
+    let mut z = preconditioner.apply(&residual)?;
     let mut direction = z.clone();
     let mut rho = dot(&residual, &z);
     for iteration in 1..=options.max_iterations {
@@ -479,7 +490,7 @@ pub fn conjugate_gradient_with_options(
         if residual_ratio(&residual, rhs_norm) <= options.tolerance {
             return Ok(linear_report(solution, iteration, &residual, rhs_norm, IterativeTermination::Converged));
         }
-        z = apply_linear_preconditioner(&residual, inverse_diagonal.as_deref());
+        z = preconditioner.apply(&residual)?;
         let next_rho = dot(&residual, &z);
         if !next_rho.is_finite() || next_rho <= 0.0 {
             return Ok(linear_report(solution, iteration, &residual, rhs_norm, IterativeTermination::Breakdown));
@@ -504,7 +515,7 @@ pub fn bicgstab(
         return Ok(linear_report(solution, 0, &residual, rhs_norm, IterativeTermination::Converged));
     }
     let shadow = residual.clone();
-    let inverse_diagonal = linear_inverse_diagonal(matrix, options.preconditioner);
+    let preconditioner = BuiltPreconditioner::factor(matrix, options.preconditioner)?;
     let n = rhs.len();
     let mut direction = vec![0.0; n];
     let mut projected = vec![0.0; n];
@@ -518,7 +529,7 @@ pub fn bicgstab(
         for index in 0..n {
             direction[index] = residual[index] + beta * (direction[index] - omega * projected[index]);
         }
-        let preconditioned_direction = apply_linear_preconditioner(&direction, inverse_diagonal.as_deref());
+        let preconditioned_direction = preconditioner.apply(&direction)?;
         projected = matrix.spmv(&preconditioned_direction)?;
         let shadow_projection = dot(&shadow, &projected);
         if !shadow_projection.is_finite() || shadow_projection == 0.0 {
@@ -531,7 +542,7 @@ pub fn bicgstab(
             axpy(&mut solution, alpha, &preconditioned_direction);
             return Ok(linear_report(solution, iteration, &intermediate, rhs_norm, IterativeTermination::Converged));
         }
-        let preconditioned_intermediate = apply_linear_preconditioner(&intermediate, inverse_diagonal.as_deref());
+        let preconditioned_intermediate = preconditioner.apply(&intermediate)?;
         let t = matrix.spmv(&preconditioned_intermediate)?;
         let denominator = dot(&t, &t);
         if !denominator.is_finite() || denominator == 0.0 {
@@ -563,7 +574,7 @@ pub fn gmres(
     let max_iterations = options.max_iterations;
     let tolerance = options.tolerance;
     let mut solution = options.initial_solution.unwrap_or_else(|| vec![0.0; matrix.cols()]);
-    let inverse_diagonal = linear_inverse_diagonal(matrix, options.preconditioner);
+    let preconditioner = BuiltPreconditioner::factor(matrix, options.preconditioner)?;
     let rhs_norm = dot(rhs, rhs).sqrt().max(1e-30);
     let mut iterations = 0usize;
 
@@ -573,7 +584,7 @@ pub fn gmres(
         if residual_ratio(&residual, rhs_norm) <= tolerance {
             return Ok(linear_report(solution, iterations, &residual, rhs_norm, IterativeTermination::Converged));
         }
-        let preconditioned_residual = apply_linear_preconditioner(&residual, inverse_diagonal.as_deref());
+        let preconditioned_residual = preconditioner.apply(&residual)?;
         let beta = dot(&preconditioned_residual, &preconditioned_residual).sqrt();
         if !beta.is_finite() || beta == 0.0 {
             return Ok(linear_report(solution, iterations, &residual, rhs_norm, IterativeTermination::Breakdown));
@@ -592,7 +603,7 @@ pub fn gmres(
 
         for column in 0..inner_limit {
             let projected = matrix.spmv(&basis[column])?;
-            let mut work = apply_linear_preconditioner(&projected, inverse_diagonal.as_deref());
+            let mut work = preconditioner.apply(&projected)?;
             for row in 0..=column {
                 hessenberg[row][column] = dot(&work, &basis[row]);
                 axpy(&mut work, -hessenberg[row][column], &basis[row]);
@@ -685,19 +696,41 @@ fn validate_linear_system(
     Ok(())
 }
 
-fn linear_inverse_diagonal(matrix: &CsrMatrix<f64>, preconditioner: LinearPreconditioner) -> Option<Vec<f64>> {
-    if preconditioner == LinearPreconditioner::None { return None; }
-    let mut diagonal = vec![0.0; matrix.rows()];
-    for (row, column, value) in matrix.iter_entries() {
-        if row == column { diagonal[row] += value; }
-    }
-    Some(diagonal.into_iter().map(|value| if value != 0.0 { 1.0 / value } else { 1.0 }).collect())
+enum BuiltPreconditioner {
+    None,
+    Jacobi(Vec<f64>),
+    Ilu0(nc_sparse::Ilu0),
+    IncompleteCholesky(nc_sparse::IncompleteCholesky),
 }
 
-fn apply_linear_preconditioner(values: &[f64], inverse_diagonal: Option<&[f64]>) -> Vec<f64> {
-    match inverse_diagonal {
-        Some(diagonal) => values.iter().zip(diagonal).map(|(value, scale)| value * scale).collect(),
-        None => values.to_vec(),
+impl BuiltPreconditioner {
+    fn factor(matrix: &CsrMatrix<f64>, kind: LinearPreconditioner)
+        -> Result<Self, IterativeSolveError>
+    {
+        Ok(match kind {
+            LinearPreconditioner::None => Self::None,
+            LinearPreconditioner::Jacobi => {
+                let mut diagonal = vec![0.0; matrix.rows()];
+                for (row, column, value) in matrix.iter_entries() {
+                    if row == column { diagonal[row] += value; }
+                }
+                Self::Jacobi(diagonal.into_iter()
+                    .map(|value| if value != 0.0 { 1.0 / value } else { 1.0 }).collect())
+            }
+            LinearPreconditioner::Ilu0 => Self::Ilu0(nc_sparse::Ilu0::factor(matrix, 1e-14)?),
+            LinearPreconditioner::IncompleteCholesky => Self::IncompleteCholesky(
+                nc_sparse::IncompleteCholesky::factor(matrix, 1e-14)?),
+        })
+    }
+
+    fn apply(&self, values: &[f64]) -> Result<Vec<f64>, IterativeSolveError> {
+        Ok(match self {
+            Self::None => values.to_vec(),
+            Self::Jacobi(diagonal) => values.iter().zip(diagonal)
+                .map(|(value, scale)| value * scale).collect(),
+            Self::Ilu0(factor) => factor.apply(values)?,
+            Self::IncompleteCholesky(factor) => factor.apply(values)?,
+        })
     }
 }
 
@@ -965,5 +998,35 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(StatisticalSolveError::InitialSolutionLength { .. })));
+    }
+
+    #[test]
+    fn incomplete_cholesky_preconditions_cg() {
+        let matrix = CsrMatrix::new(
+            3, 3, vec![0, 2, 5, 7], vec![0, 1, 0, 1, 2, 1, 2],
+            vec![4.0, 1.0, 1.0, 3.0, 1.0, 1.0, 2.0],
+        ).unwrap();
+        let result = conjugate_gradient_with_options(
+            &matrix, &[6.0, 10.0, 8.0], LinearSolveOptions {
+                preconditioner: LinearPreconditioner::IncompleteCholesky,
+                tolerance: 1e-12, ..LinearSolveOptions::default()
+            },
+        ).unwrap();
+        assert!(result.converged());
+        assert_eq!(result.iterations, 1);
+    }
+
+    #[test]
+    fn ilu0_preconditions_gmres() {
+        let matrix = CsrMatrix::new(
+            3, 3, vec![0, 2, 5, 7], vec![0, 1, 0, 1, 2, 1, 2],
+            vec![4.0, 1.0, 2.0, 3.0, 1.0, 1.0, 2.0],
+        ).unwrap();
+        let result = gmres(&matrix, &[6.0, 11.0, 8.0], LinearSolveOptions {
+            preconditioner: LinearPreconditioner::Ilu0,
+            tolerance: 1e-12, ..LinearSolveOptions::default()
+        }, 3).unwrap();
+        assert!(result.converged());
+        assert_eq!(result.iterations, 1);
     }
 }
