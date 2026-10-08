@@ -710,6 +710,17 @@ pub struct FfiInteriorPointOptions {
     pub scaling: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiNodeSelection { DepthFirst, BestBound }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiBranchingStrategy { MostFractional, PseudoCost }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiBranchAndBoundTermination {
+    Exhausted, GapSatisfied, NodeLimit, RelaxationLimit, Unbounded, ContinuousRelaxation,
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiBranchAndBoundOptions {
     pub max_nodes: u64,
@@ -717,6 +728,11 @@ pub struct FfiBranchAndBoundOptions {
     pub scaling: bool,
     /// Empty means no incumbent. Otherwise one value per variable.
     pub initial_incumbent: Vec<f64>,
+    pub absolute_gap_tolerance: f64,
+    pub relative_gap_tolerance: f64,
+    pub node_selection: FfiNodeSelection,
+    pub branching_strategy: FfiBranchingStrategy,
+    pub bound_propagation: bool,
 }
 
 /// MILP result plus the search certificate available at termination.
@@ -727,6 +743,13 @@ pub struct FfiMilpSolveResult {
     pub best_bound: Option<f64>,
     pub absolute_gap: Option<f64>,
     pub relative_gap: Option<f64>,
+    pub nodes_pruned_infeasible: u64,
+    pub nodes_pruned_by_bound: u64,
+    pub maximum_depth: u64,
+    pub relaxations_solved: u64,
+    pub bounds_tightened: u64,
+    pub incumbents_found: u64,
+    pub termination: FfiBranchAndBoundTermination,
 }
 
 fn optimization_limit(value: u64, name: &'static str) -> Result<usize, FfiError> {
@@ -879,9 +902,17 @@ pub fn solve_milp_branch_and_bound_with_options(
     let solver = nc_optimize::BranchAndBoundSolver {
         max_nodes: optimization_limit(options.max_nodes, "max_nodes")?,
         integer_tolerance: options.integer_tolerance,
-        absolute_gap_tolerance: 0.0,
-        relative_gap_tolerance: 0.0,
-        node_selection: nc_optimize::NodeSelection::BestBound,
+        absolute_gap_tolerance: options.absolute_gap_tolerance,
+        relative_gap_tolerance: options.relative_gap_tolerance,
+        node_selection: match options.node_selection {
+            FfiNodeSelection::DepthFirst => nc_optimize::NodeSelection::DepthFirst,
+            FfiNodeSelection::BestBound => nc_optimize::NodeSelection::BestBound,
+        },
+        branching_strategy: match options.branching_strategy {
+            FfiBranchingStrategy::MostFractional => nc_optimize::BranchingStrategy::MostFractional,
+            FfiBranchingStrategy::PseudoCost => nc_optimize::BranchingStrategy::PseudoCost,
+        },
+        bound_propagation: options.bound_propagation,
         relaxation_solver: Box::new(nc_optimize::RevisedSimplexSolver::default()),
     };
     let scaled = options.scaling.then(|| nc_optimize::ScaledProblem::new(
@@ -906,6 +937,20 @@ pub fn solve_milp_branch_and_bound_with_options(
         best_bound: report.best_bound,
         absolute_gap: report.absolute_gap,
         relative_gap: report.relative_gap,
+        nodes_pruned_infeasible: report.nodes_pruned_infeasible as u64,
+        nodes_pruned_by_bound: report.nodes_pruned_by_bound as u64,
+        maximum_depth: report.maximum_depth as u64,
+        relaxations_solved: report.relaxations_solved as u64,
+        bounds_tightened: report.bounds_tightened as u64,
+        incumbents_found: report.incumbents_found as u64,
+        termination: match report.termination {
+            nc_optimize::BranchAndBoundTermination::Exhausted => FfiBranchAndBoundTermination::Exhausted,
+            nc_optimize::BranchAndBoundTermination::GapSatisfied => FfiBranchAndBoundTermination::GapSatisfied,
+            nc_optimize::BranchAndBoundTermination::NodeLimit => FfiBranchAndBoundTermination::NodeLimit,
+            nc_optimize::BranchAndBoundTermination::RelaxationLimit => FfiBranchAndBoundTermination::RelaxationLimit,
+            nc_optimize::BranchAndBoundTermination::Unbounded => FfiBranchAndBoundTermination::Unbounded,
+            nc_optimize::BranchAndBoundTermination::ContinuousRelaxation => FfiBranchAndBoundTermination::ContinuousRelaxation,
+        },
     })
 }
 
@@ -1450,6 +1495,10 @@ mod tests {
             FfiBranchAndBoundOptions {
                 max_nodes: 10, integer_tolerance: 1e-8,
                 scaling: true, initial_incumbent: vec![],
+                absolute_gap_tolerance: 0.0, relative_gap_tolerance: 0.0,
+                node_selection: FfiNodeSelection::BestBound,
+                branching_strategy: FfiBranchingStrategy::PseudoCost,
+                bound_propagation: true,
             },
         ).unwrap();
         assert_eq!(report.solution.status, FfiSolveStatus::Optimal);
@@ -1458,6 +1507,8 @@ mod tests {
         assert_eq!(report.best_bound, Some(-6.0));
         assert_eq!(report.absolute_gap, Some(0.0));
         assert_eq!(report.relative_gap, Some(0.0));
+        assert_eq!(report.termination, FfiBranchAndBoundTermination::Exhausted);
+        assert_eq!(report.relaxations_solved, 1);
     }
 
     #[test]

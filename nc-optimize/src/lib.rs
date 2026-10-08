@@ -22,7 +22,8 @@ pub use interior_point::InteriorPointSolver;
 
 pub mod branch_and_bound;
 pub use branch_and_bound::{
-    BranchAndBoundReport, BranchAndBoundSolver, BranchAndBoundTermination, NodeSelection,
+    BranchAndBoundReport, BranchAndBoundSolver, BranchAndBoundTermination, BranchingStrategy,
+    NodeSelection,
 };
 
 pub mod lbfgs;

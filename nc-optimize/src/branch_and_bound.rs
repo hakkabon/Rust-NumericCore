@@ -24,10 +24,13 @@
 //! bounding — e.g. cutting planes — only improves speed).
 //!
 //! ## Scope, deliberately (matching `simplex`/`interior_point`'s stance)
-//! - **Most-fractional branching** (the integer variable whose value is
-//!   closest to `x.floor() + 0.5`), not pseudocost or strong branching.
-//!   Simpler, correct, slower to converge on hard instances — a real
-//!   future improvement, not a correctness gap.
+//! - **Learned pseudo-cost branching by default.** Objective degradation from
+//!   solved children is accumulated per variable and direction. Variables
+//!   without reliable observations use deterministic most-fractional fallback;
+//!   most-fractional remains directly selectable for comparison.
+//! - **Singleton-row bound propagation** tightens variable domains before each
+//!   relaxation and rounds implied integer bounds inward. Contradictions prune
+//!   a node without spending an LP solve.
 //! - **Selectable depth-first or best-bound search.** Best-bound is the
 //!   default because it focuses work on closing the global certificate;
 //!   depth-first remains available for memory-sensitive workloads.
@@ -66,6 +69,16 @@ pub enum NodeSelection {
     BestBound,
 }
 
+/// Policy used to select the integer variable to branch on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchingStrategy {
+    MostFractional,
+    /// Learn objective degradation per unit branch displacement from solved
+    /// children. Variables without observations fall back deterministically to
+    /// most-fractional selection.
+    PseudoCost,
+}
+
 /// Why a branch-and-bound search returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchAndBoundTermination {
@@ -86,6 +99,10 @@ pub struct BranchAndBoundSolver {
     /// Scale-independent counterpart to `absolute_gap_tolerance`.
     pub relative_gap_tolerance: f64,
     pub node_selection: NodeSelection,
+    pub branching_strategy: BranchingStrategy,
+    /// Tighten variable bounds implied by singleton constraint rows before
+    /// solving each node relaxation.
+    pub bound_propagation: bool,
     pub relaxation_solver: Box<dyn Solver>,
 }
 
@@ -101,6 +118,9 @@ pub struct BranchAndBoundReport {
     pub nodes_pruned_infeasible: usize,
     pub nodes_pruned_by_bound: usize,
     pub maximum_depth: usize,
+    pub relaxations_solved: usize,
+    pub bounds_tightened: usize,
+    pub incumbents_found: usize,
     pub termination: BranchAndBoundTermination,
 }
 
@@ -112,6 +132,8 @@ impl Default for BranchAndBoundSolver {
             absolute_gap_tolerance: 0.0,
             relative_gap_tolerance: 0.0,
             node_selection: NodeSelection::BestBound,
+            branching_strategy: BranchingStrategy::PseudoCost,
+            bound_propagation: true,
             relaxation_solver: Box::new(RevisedSimplexSolver::default()),
         }
     }
@@ -127,7 +149,19 @@ struct NodeBounds {
     /// Valid lower bound inherited from this node's parent relaxation.
     lower_bound: Option<f64>,
     depth: usize,
+    branch_origin: Option<BranchOrigin>,
 }
+
+#[derive(Clone, Copy)]
+struct BranchOrigin {
+    variable: usize,
+    direction: BranchDirection,
+    parent_objective: f64,
+    distance: f64,
+}
+
+#[derive(Clone, Copy)]
+enum BranchDirection { Down, Up }
 
 impl NodeBounds {
     fn tightened(&self, var_index: usize, lower: Option<f64>, upper: Option<f64>) -> Self {
@@ -137,7 +171,10 @@ impl NodeBounds {
             lower: tighter_lower(current.lower, lower),
             upper: tighter_upper(current.upper, upper),
         };
-        Self { var_bounds, lower_bound: self.lower_bound, depth: self.depth + 1 }
+        Self {
+            var_bounds, lower_bound: self.lower_bound, depth: self.depth + 1,
+            branch_origin: None,
+        }
     }
 }
 
@@ -201,19 +238,25 @@ impl BranchAndBoundSolver {
             // tree with nothing to branch on.
             let solution = self.relaxation_solver.solve(problem)?;
             let bound = (solution.status == SolveStatus::Optimal).then_some(solution.objective_value);
-            return Ok(report(solution, 1, bound, SearchStatistics::default(),
+            return Ok(report(solution, 1, bound, SearchStatistics {
+                relaxations_solved: 1, ..Default::default()
+            },
                 BranchAndBoundTermination::ContinuousRelaxation));
         }
 
         let mut frontier = vec![NodeBounds {
             var_bounds: problem.var_bounds.clone(), lower_bound: None, depth: 0,
+            branch_origin: None,
         }];
         let mut incumbent = match initial_incumbent {
             Some(values) => Some(validated_incumbent(problem, values, self.integer_tolerance)?),
             None => None,
         };
         let mut nodes_explored = 0usize;
-        let mut statistics = SearchStatistics::default();
+        let mut statistics = SearchStatistics {
+            incumbents_found: usize::from(incumbent.is_some()), ..Default::default()
+        };
+        let mut pseudo_costs = PseudoCosts::new(problem.objective.len());
         let mut search_incomplete = false;
         let mut incomplete_bound: Option<f64> = None;
 
@@ -235,7 +278,17 @@ impl BranchAndBoundSolver {
             nodes_explored += 1;
             statistics.maximum_depth = statistics.maximum_depth.max(node.depth);
 
-            if node.var_bounds.iter().any(|bound| {
+            let mut node_bounds = node.var_bounds.clone();
+            if self.bound_propagation {
+                match propagate_singleton_bounds(problem, &mut node_bounds, self.integer_tolerance) {
+                    Ok(tightened) => statistics.bounds_tightened += tightened,
+                    Err(()) => {
+                        statistics.nodes_pruned_infeasible += 1;
+                        continue;
+                    }
+                }
+            }
+            if node_bounds.iter().any(|bound| {
                 matches!((bound.lower, bound.upper), (Some(lower), Some(upper)) if lower > upper)
             }) {
                 statistics.nodes_pruned_infeasible += 1;
@@ -246,11 +299,18 @@ impl BranchAndBoundSolver {
                 objective: problem.objective.clone(),
                 constraints: problem.constraints.clone(),
                 row_bounds: problem.row_bounds.clone(),
-                var_bounds: node.var_bounds.clone(),
+                var_bounds: node_bounds,
                 is_integer: problem.is_integer.clone(),
             };
 
             let relaxed = self.relaxation_solver.solve(&node_problem)?;
+            statistics.relaxations_solved += 1;
+
+            if let Some(origin) = node.branch_origin {
+                if relaxed.status == SolveStatus::Optimal {
+                    pseudo_costs.observe(origin, relaxed.objective_value);
+                }
+            }
 
             match relaxed.status {
                 SolveStatus::Infeasible => {
@@ -295,13 +355,17 @@ impl BranchAndBoundSolver {
                 }
             }
 
-            match most_fractional_integer_variable(&relaxed, &problem.is_integer, self.integer_tolerance) {
+            match branching_variable(
+                &relaxed, &problem.is_integer, self.integer_tolerance,
+                self.branching_strategy, &pseudo_costs,
+            ) {
                 None => {
                     // Every integer-restricted variable already has an
                     // integer value - this relaxation solution is
                     // integer-feasible, and (by the bounding check just
                     // above) strictly better than any prior incumbent.
                     incumbent = Some(relaxed);
+                    statistics.incumbents_found += 1;
                 }
                 Some((var_index, value)) => {
                     let floor_value = value.floor();
@@ -310,6 +374,16 @@ impl BranchAndBoundSolver {
                     let mut lower = node.tightened(var_index, Some(ceil_value), None);
                     upper.lower_bound = Some(relaxed.objective_value);
                     lower.lower_bound = Some(relaxed.objective_value);
+                    upper.branch_origin = Some(BranchOrigin {
+                        variable: var_index, direction: BranchDirection::Down,
+                        parent_objective: relaxed.objective_value,
+                        distance: value - floor_value,
+                    });
+                    lower.branch_origin = Some(BranchOrigin {
+                        variable: var_index, direction: BranchDirection::Up,
+                        parent_objective: relaxed.objective_value,
+                        distance: ceil_value - value,
+                    });
                     frontier.push(upper);
                     frontier.push(lower);
                 }
@@ -376,6 +450,9 @@ struct SearchStatistics {
     nodes_pruned_infeasible: usize,
     nodes_pruned_by_bound: usize,
     maximum_depth: usize,
+    relaxations_solved: usize,
+    bounds_tightened: usize,
+    incumbents_found: usize,
 }
 
 fn pop_node(frontier: &mut Vec<NodeBounds>, selection: NodeSelection) -> NodeBounds {
@@ -422,8 +499,120 @@ fn report(
         nodes_pruned_infeasible: statistics.nodes_pruned_infeasible,
         nodes_pruned_by_bound: statistics.nodes_pruned_by_bound,
         maximum_depth: statistics.maximum_depth,
+        relaxations_solved: statistics.relaxations_solved,
+        bounds_tightened: statistics.bounds_tightened,
+        incumbents_found: statistics.incumbents_found,
         termination,
     }
+}
+
+struct PseudoCosts {
+    down_sum: Vec<f64>, down_count: Vec<usize>,
+    up_sum: Vec<f64>, up_count: Vec<usize>,
+}
+
+impl PseudoCosts {
+    fn new(variables: usize) -> Self {
+        Self {
+            down_sum: vec![0.0; variables], down_count: vec![0; variables],
+            up_sum: vec![0.0; variables], up_count: vec![0; variables],
+        }
+    }
+
+    fn observe(&mut self, origin: BranchOrigin, objective: f64) {
+        if origin.distance <= 0.0 { return; }
+        let cost = ((objective - origin.parent_objective) / origin.distance).max(0.0);
+        match origin.direction {
+            BranchDirection::Down => {
+                self.down_sum[origin.variable] += cost;
+                self.down_count[origin.variable] += 1;
+            }
+            BranchDirection::Up => {
+                self.up_sum[origin.variable] += cost;
+                self.up_count[origin.variable] += 1;
+            }
+        }
+    }
+
+    fn score(&self, variable: usize, fraction: f64) -> Option<f64> {
+        let down_count = self.down_count[variable];
+        let up_count = self.up_count[variable];
+        if down_count == 0 || up_count == 0 { return None; }
+        let down = self.down_sum[variable] / down_count as f64 * fraction;
+        let up = self.up_sum[variable] / up_count as f64 * (1.0 - fraction);
+        Some(down.min(up) + 0.1 * down.max(up))
+    }
+}
+
+fn branching_variable(
+    solution: &Solution,
+    is_integer: &[bool],
+    tolerance: f64,
+    strategy: BranchingStrategy,
+    pseudo_costs: &PseudoCosts,
+) -> Option<(usize, f64)> {
+    if strategy == BranchingStrategy::MostFractional {
+        return most_fractional_integer_variable(solution, is_integer, tolerance);
+    }
+    let mut best: Option<(usize, f64, f64)> = None;
+    for (variable, &integer) in is_integer.iter().enumerate() {
+        if !integer { continue; }
+        let value = solution.variable_values[variable];
+        let fraction = value - value.floor();
+        let distance = fraction.min(1.0 - fraction);
+        if distance <= tolerance { continue; }
+        let Some(score) = pseudo_costs.score(variable, fraction) else { continue };
+        if best.map_or(true, |(_, _, current)| score > current) {
+            best = Some((variable, value, score));
+        }
+    }
+    best.map(|(variable, value, _)| (variable, value))
+        .or_else(|| most_fractional_integer_variable(solution, is_integer, tolerance))
+}
+
+/// Tighten bounds implied by rows containing exactly one nonzero coefficient.
+/// Repeats are unnecessary because singleton rows do not depend on other
+/// variables. Integer variables are rounded inward to their lattice.
+fn propagate_singleton_bounds(
+    problem: &Problem,
+    bounds: &mut [Bound],
+    tolerance: f64,
+) -> Result<usize, ()> {
+    let mut entries_by_row = vec![Vec::<(usize, f64)>::new(); problem.constraints.rows()];
+    for (row, column, value) in problem.constraints.iter_entries() {
+        entries_by_row[row].push((column, value));
+    }
+    let mut tightened = 0;
+    for (row, entries) in entries_by_row.iter().enumerate() {
+        if entries.len() != 1 { continue; }
+        let (column, coefficient) = entries[0];
+        let row_bound = problem.row_bounds[row];
+        let mut implied = if coefficient > 0.0 {
+            Bound {
+                lower: row_bound.lower.map(|value| value / coefficient),
+                upper: row_bound.upper.map(|value| value / coefficient),
+            }
+        } else {
+            Bound {
+                lower: row_bound.upper.map(|value| value / coefficient),
+                upper: row_bound.lower.map(|value| value / coefficient),
+            }
+        };
+        if problem.is_integer[column] {
+            implied.lower = implied.lower.map(|value| (value - tolerance).ceil());
+            implied.upper = implied.upper.map(|value| (value + tolerance).floor());
+        }
+        let old = bounds[column];
+        let new = Bound {
+            lower: tighter_lower(old.lower, implied.lower),
+            upper: tighter_upper(old.upper, implied.upper),
+        };
+        if matches!((new.lower, new.upper), (Some(lower), Some(upper)) if lower > upper) {
+            return Err(());
+        }
+        if new != old { tightened += 1; bounds[column] = new; }
+    }
+    Ok(tightened)
 }
 
 /// Finds the integer-restricted variable furthest from an integer
@@ -644,6 +833,8 @@ mod tests {
             absolute_gap_tolerance: 0.0,
             relative_gap_tolerance: 0.0,
             node_selection: NodeSelection::DepthFirst,
+            branching_strategy: BranchingStrategy::MostFractional,
+            bound_propagation: true,
             relaxation_solver: Box::new(RevisedSimplexSolver::default()),
         };
         let report = solver.solve_with_report(&problem).unwrap();
@@ -689,8 +880,9 @@ mod tests {
         );
         let report = BranchAndBoundSolver::default().solve_with_report(&problem).unwrap();
         assert_eq!(report.termination, BranchAndBoundTermination::Exhausted);
-        assert!(report.nodes_pruned_infeasible >= 2);
-        assert_eq!(report.maximum_depth, 1);
+        assert_eq!(report.nodes_pruned_infeasible, 1);
+        assert_eq!(report.maximum_depth, 0);
+        assert_eq!(report.relaxations_solved, 0);
     }
 
     #[test]
@@ -716,5 +908,33 @@ mod tests {
         );
         let result = BranchAndBoundSolver::default().solve_with_report_warm(&problem, Some(&[2.0]));
         assert!(matches!(result, Err(OptimizeError::InvalidConfiguration(_))));
+    }
+
+    #[test]
+    fn singleton_propagation_tightens_an_integer_domain_before_relaxation() {
+        let problem = dense_problem(
+            vec![1.0], vec![vec![2.0]], vec![Bound { lower: Some(4.0), upper: None }],
+            vec![Bound { lower: Some(0.0), upper: None }], vec![true],
+        );
+        let report = BranchAndBoundSolver::default().solve_with_report(&problem).unwrap();
+        assert_eq!(report.solution.status, SolveStatus::Optimal);
+        assert_eq!(report.solution.variable_values, vec![2.0]);
+        assert_eq!(report.bounds_tightened, 1);
+        assert_eq!(report.relaxations_solved, 1);
+    }
+
+    #[test]
+    fn pseudo_costs_learn_directional_balanced_gain() {
+        let mut costs = PseudoCosts::new(1);
+        costs.observe(BranchOrigin {
+            variable: 0, direction: BranchDirection::Down,
+            parent_objective: 10.0, distance: 0.25,
+        }, 11.0);
+        costs.observe(BranchOrigin {
+            variable: 0, direction: BranchDirection::Up,
+            parent_objective: 10.0, distance: 0.75,
+        }, 13.0);
+        let score = costs.score(0, 0.25).unwrap();
+        assert!((score - 1.3).abs() < 1e-12);
     }
 }
