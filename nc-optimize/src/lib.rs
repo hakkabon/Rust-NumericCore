@@ -57,8 +57,14 @@ pub use sparse_derivatives::{SparseDerivative, SparseJacobian};
 
 pub mod sqp;
 pub use sqp::{
-    minimize_sqp, minimize_sqp_with_observer, SqpIteration, SqpOptions, SqpResult,
-    SqpTermination,
+    minimize_sqp, minimize_sqp_with_observer, SqpGlobalization, SqpIteration, SqpOptions,
+    SqpResult, SqpTermination,
+};
+
+pub mod feasibility_restoration;
+pub use feasibility_restoration::{
+    restore_feasibility, FeasibilityRestorationOptions, FeasibilityRestorationResult,
+    FeasibilityRestorationTermination,
 };
 
 pub mod constrained_nonlinear;

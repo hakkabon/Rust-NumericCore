@@ -1,7 +1,8 @@
 //! Feasible-start interior-point method for graph-represented nonlinear programs.
 
 use crate::{
-    Bound, ConstrainedNonlinearProblem, ConstraintMultiplier, DifferentiableValue, OptimizeError,
+    restore_feasibility, Bound, ConstrainedNonlinearProblem, ConstraintMultiplier,
+    DifferentiableValue, FeasibilityRestorationOptions, OptimizeError,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -19,6 +20,8 @@ pub struct NonlinearInteriorPointOptions {
     pub backtracking: f64,
     pub fraction_to_boundary: f64,
     pub max_line_search_iterations: usize,
+    pub restoration: bool,
+    pub restoration_options: FeasibilityRestorationOptions,
 }
 
 impl Default for NonlinearInteriorPointOptions {
@@ -30,13 +33,19 @@ impl Default for NonlinearInteriorPointOptions {
             barrier_reduction: 0.2, minimum_barrier: 1e-7,
             equality_penalty: 10.0, armijo: 1e-4, backtracking: 0.5,
             fraction_to_boundary: 0.995, max_line_search_iterations: 40,
+            restoration: false,
+            restoration_options: FeasibilityRestorationOptions {
+                interior_margin: 1e-6,
+                ..FeasibilityRestorationOptions::default()
+            },
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NonlinearInteriorPointTermination {
-    Converged, IterationLimit, InfeasibleStart, LineSearchFailed, NumericalFailure, Cancelled,
+    Converged, IterationLimit, InfeasibleStart, RestorationFailed, LineSearchFailed,
+    NumericalFailure, Cancelled,
 }
 
 #[derive(Debug, Clone)]
@@ -90,16 +99,29 @@ where O: FnMut(NonlinearInteriorPointIteration) -> bool {
         return Err(invalid("initial point must match the nonlinear interior-point problem"));
     }
     let mut point = initial.to_vec();
-    let initial_values = problem.evaluate_constraints(&point)?;
+    let mut restoration_evaluations = 0;
+    let mut initial_values = problem.evaluate_constraints(&point)?;
     if !strictly_interior(problem, &point, &initial_values) {
-        return Ok(finish(problem, point, vec![0.0; equality_count(problem)], 0, 1,
-            options.initial_barrier, 0, 0, NonlinearInteriorPointTermination::InfeasibleStart)?);
+        if !options.restoration {
+            return Ok(finish(problem, point, vec![0.0; equality_count(problem)], 0, 1,
+                options.initial_barrier, 0, 0,
+                NonlinearInteriorPointTermination::InfeasibleStart)?);
+        }
+        let restored = restore_feasibility(problem, &point, options.restoration_options)?;
+        restoration_evaluations = restored.evaluations;
+        point = restored.point;
+        initial_values = problem.evaluate_constraints(&point)?;
+        if !strictly_interior(problem, &point, &initial_values) {
+            return Ok(finish(problem, point, vec![0.0; equality_count(problem)], 0,
+                restored.evaluations + 1, options.initial_barrier, 0, 0,
+                NonlinearInteriorPointTermination::RestorationFailed)?);
+        }
     }
 
     let mut equality_multipliers = vec![0.0; equality_count(problem)];
     let mut barrier = options.initial_barrier;
     let mut total_inner = 0;
-    let mut evaluations = 1;
+    let mut evaluations = 1 + restoration_evaluations;
     let mut accepted_steps = 0;
     let mut rejected_steps = 0;
 
@@ -409,5 +431,21 @@ mod tests {
         let result = minimize_nonlinear_interior_point(
             &problem, &[1.0], NonlinearInteriorPointOptions::default()).unwrap();
         assert_eq!(result.termination, NonlinearInteriorPointTermination::InfeasibleStart);
+    }
+
+    #[test]
+    fn restoration_recovers_a_non_strict_start() {
+        let objective = expression(vec![NonlinearNode::Parameter(0), NonlinearNode::Powf(0, 2.0)]);
+        let constraint = expression(vec![NonlinearNode::Parameter(0)]);
+        let problem = ConstrainedNonlinearProblem {
+            model: NonlinearModel { parameter_count: 1, bounds: vec![Bound::free()],
+                objective: Some(objective), residuals: vec![] },
+            constraints: vec![NonlinearConstraint { expression: constraint,
+                bound: Bound { lower: None, upper: Some(1.0) } }],
+        };
+        let result = minimize_nonlinear_interior_point(&problem, &[1.0],
+            NonlinearInteriorPointOptions { restoration: true, ..Default::default() }).unwrap();
+        assert_eq!(result.termination, NonlinearInteriorPointTermination::Converged, "{result:?}");
+        assert!(result.maximum_violation <= 1e-7);
     }
 }

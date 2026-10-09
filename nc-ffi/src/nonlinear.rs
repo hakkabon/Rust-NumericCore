@@ -13,8 +13,35 @@ use nc_optimize::{
     NonlinearConstraint, NonlinearExpression, NonlinearInteriorPointOptions,
     NonlinearInteriorPointResult, NonlinearInteriorPointTermination, NonlinearLeastSquaresOptions,
     NonlinearLeastSquaresResult, NonlinearModel, NonlinearNode, NonlinearRelaxationStrategy,
-    NonlinearTermination, QuadraticOptions, RobustLoss, SqpOptions, SqpResult, SqpTermination,
+    NonlinearTermination, QuadraticOptions, RobustLoss, SqpGlobalization, SqpOptions, SqpResult,
+    SqpTermination, FeasibilityRestorationOptions, FeasibilityRestorationTermination,
+    restore_feasibility,
 };
+
+#[derive(Debug, Clone, Copy, uniffi::Record)]
+pub struct FfiFeasibilityRestorationOptions {
+    pub max_iterations: u64,
+    pub feasibility_tolerance: f64,
+    pub interior_margin: f64,
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum FfiFeasibilityRestorationTermination {
+    AlreadyFeasible,
+    Converged,
+    IterationLimit,
+    Stalled,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiFeasibilityRestorationResult {
+    pub point: Vec<f64>,
+    pub maximum_violation: f64,
+    pub squared_violation: f64,
+    pub iterations: u64,
+    pub evaluations: u64,
+    pub termination: FfiFeasibilityRestorationTermination,
+}
 
 #[derive(Debug, Clone, Copy, uniffi::Enum)]
 pub enum FfiNonlinearNodeKind {
@@ -195,6 +222,8 @@ pub struct FfiNonlinearInteriorPointOptions {
     pub backtracking: f64,
     pub fraction_to_boundary: f64,
     pub max_line_search_iterations: u64,
+    pub restoration: bool,
+    pub restoration_options: FfiFeasibilityRestorationOptions,
 }
 
 #[derive(Debug, Clone, Copy, uniffi::Enum)]
@@ -202,6 +231,7 @@ pub enum FfiNonlinearInteriorPointTermination {
     Converged,
     IterationLimit,
     InfeasibleStart,
+    RestorationFailed,
     LineSearchFailed,
     NumericalFailure,
     Cancelled,
@@ -288,7 +318,15 @@ pub struct FfiSqpOptions {
     pub qp_absolute_tolerance: f64,
     pub qp_relative_tolerance: f64,
     pub qp_convexity_tolerance: f64,
+    pub restoration: bool,
+    pub restoration_options: FfiFeasibilityRestorationOptions,
+    pub globalization: FfiSqpGlobalization,
+    pub filter_constraint_margin: f64,
+    pub filter_objective_margin: f64,
 }
+
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum FfiSqpGlobalization { Merit, Filter }
 
 #[derive(Debug, Clone, Copy, uniffi::Enum)]
 pub enum FfiSqpTermination {
@@ -297,6 +335,7 @@ pub enum FfiSqpTermination {
     StepLimit,
     LineSearchFailed,
     QpFailure,
+    RestorationFailed,
     Cancelled,
 }
 
@@ -556,6 +595,48 @@ fn constrained_result(value: ConstrainedResult) -> FfiConstrainedResult {
     }
 }
 
+fn restoration_options(value: FfiFeasibilityRestorationOptions)
+    -> Result<FeasibilityRestorationOptions, FfiError> {
+    Ok(FeasibilityRestorationOptions {
+        max_iterations: count(value.max_iterations, "restoration max_iterations")?,
+        feasibility_tolerance: value.feasibility_tolerance,
+        interior_margin: value.interior_margin,
+    })
+}
+
+#[uniffi::export]
+pub fn restore_nonlinear_feasibility(
+    model_value: FfiNonlinearModel,
+    constraints: Vec<FfiNonlinearConstraint>,
+    initial: Vec<f64>,
+    options: FfiFeasibilityRestorationOptions,
+) -> Result<FfiFeasibilityRestorationResult, FfiError> {
+    let problem = ConstrainedNonlinearProblem {
+        model: model(model_value),
+        constraints: constraints.into_iter().map(|value| NonlinearConstraint {
+            expression: expression(value.expression), bound: bound(value.bound),
+        }).collect(),
+    };
+    let value = restore_feasibility(&problem, &initial, restoration_options(options)?)?;
+    Ok(FfiFeasibilityRestorationResult {
+        point: value.point,
+        maximum_violation: value.maximum_violation,
+        squared_violation: value.squared_violation,
+        iterations: value.iterations as u64,
+        evaluations: value.evaluations as u64,
+        termination: match value.termination {
+            FeasibilityRestorationTermination::AlreadyFeasible =>
+                FfiFeasibilityRestorationTermination::AlreadyFeasible,
+            FeasibilityRestorationTermination::Converged =>
+                FfiFeasibilityRestorationTermination::Converged,
+            FeasibilityRestorationTermination::IterationLimit =>
+                FfiFeasibilityRestorationTermination::IterationLimit,
+            FeasibilityRestorationTermination::Stalled =>
+                FfiFeasibilityRestorationTermination::Stalled,
+        },
+    })
+}
+
 #[uniffi::export]
 pub fn solve_nonlinear_interior_point(
     model_value: FfiNonlinearModel,
@@ -590,6 +671,8 @@ pub fn solve_nonlinear_interior_point(
             options.max_line_search_iterations,
             "max_line_search_iterations",
         )?,
+        restoration: options.restoration,
+        restoration_options: restoration_options(options.restoration_options)?,
     };
     Ok(interior_point_result(minimize_nonlinear_interior_point(
         &problem, &initial, options,
@@ -628,6 +711,9 @@ fn interior_point_result(value: NonlinearInteriorPointResult) -> FfiNonlinearInt
             }
             NonlinearInteriorPointTermination::InfeasibleStart => {
                 FfiNonlinearInteriorPointTermination::InfeasibleStart
+            }
+            NonlinearInteriorPointTermination::RestorationFailed => {
+                FfiNonlinearInteriorPointTermination::RestorationFailed
             }
             NonlinearInteriorPointTermination::LineSearchFailed => {
                 FfiNonlinearInteriorPointTermination::LineSearchFailed
@@ -771,6 +857,14 @@ pub fn solve_sqp(
             relative_tolerance: options.qp_relative_tolerance,
             convexity_tolerance: options.qp_convexity_tolerance,
         },
+        restoration: options.restoration,
+        restoration_options: restoration_options(options.restoration_options)?,
+        globalization: match options.globalization {
+            FfiSqpGlobalization::Merit => SqpGlobalization::Merit,
+            FfiSqpGlobalization::Filter => SqpGlobalization::Filter,
+        },
+        filter_constraint_margin: options.filter_constraint_margin,
+        filter_objective_margin: options.filter_objective_margin,
     };
     Ok(sqp_result(minimize_sqp(&problem, &initial, options)?))
 }
@@ -803,6 +897,7 @@ fn sqp_result(value: SqpResult) -> FfiSqpResult {
             SqpTermination::StepLimit => FfiSqpTermination::StepLimit,
             SqpTermination::LineSearchFailed => FfiSqpTermination::LineSearchFailed,
             SqpTermination::QpFailure => FfiSqpTermination::QpFailure,
+            SqpTermination::RestorationFailed => FfiSqpTermination::RestorationFailed,
             SqpTermination::Cancelled => FfiSqpTermination::Cancelled,
         },
     }

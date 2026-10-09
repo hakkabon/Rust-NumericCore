@@ -16,7 +16,8 @@ start returns `InfeasibleStart` explicitly; it is never projected silently.
 contract. This lets Swift select either implementation against the same model
 and compare numerical certificates rather than merely final points.
 
-This phase deliberately remains a first-derivative, feasible-start method.
-Restoration phases, filter globalization, sparse KKT factorization, exact or
-limited-memory Hessian operators, and warm starts for primal/dual/barrier state
-are natural follow-on work.
+The barrier iteration remains a first-derivative, feasible-start method.
+Phase 21 adds an optional Phase-I restoration pass before that iteration;
+disabling it preserves the explicit `InfeasibleStart` result. Sparse KKT
+factorization, exact or limited-memory Hessian operators, and warm starts for
+primal/dual/barrier state remain natural follow-on work.

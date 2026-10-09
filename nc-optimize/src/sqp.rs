@@ -1,8 +1,10 @@
 //! Sequential quadratic programming for graph-represented constrained models.
 
 use crate::{
-    solve_convex_qp, Bound, ConstrainedNonlinearProblem, ConstraintMultiplier, DifferentiableValue,
-    OptimizeError, QuadraticOptions, QuadraticProblem, QuadraticTermination,
+    restore_feasibility, solve_convex_qp, Bound, ConstrainedNonlinearProblem,
+    ConstraintMultiplier, DifferentiableValue, FeasibilityRestorationOptions,
+    FeasibilityRestorationTermination, OptimizeError, QuadraticOptions, QuadraticProblem,
+    QuadraticTermination,
 };
 use nc_sparse::CsrMatrix;
 
@@ -19,6 +21,17 @@ pub struct SqpOptions {
     pub max_line_search_iterations: usize,
     pub hessian_regularization: f64,
     pub qp_options: QuadraticOptions,
+    pub restoration: bool,
+    pub restoration_options: FeasibilityRestorationOptions,
+    pub globalization: SqpGlobalization,
+    pub filter_constraint_margin: f64,
+    pub filter_objective_margin: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqpGlobalization {
+    Merit,
+    Filter,
 }
 
 impl Default for SqpOptions {
@@ -35,6 +48,11 @@ impl Default for SqpOptions {
             max_line_search_iterations: 30,
             hessian_regularization: 1e-8,
             qp_options: QuadraticOptions::default(),
+            restoration: false,
+            restoration_options: FeasibilityRestorationOptions::default(),
+            globalization: SqpGlobalization::Merit,
+            filter_constraint_margin: 1e-4,
+            filter_objective_margin: 1e-4,
         }
     }
 }
@@ -46,6 +64,7 @@ pub enum SqpTermination {
     StepLimit,
     LineSearchFailed,
     QpFailure,
+    RestorationFailed,
     Cancelled,
 }
 
@@ -101,15 +120,39 @@ where
         return Err(invalid("initial point must match the SQP problem"));
     }
     let mut point = project(initial, &problem.model.bounds);
+    let mut restoration_evaluations = 0;
+    let initial_constraints = problem.evaluate_constraints(&point)?;
+    if options.restoration
+        && maximum_violation(problem, &initial_constraints) > options.feasibility_tolerance
+    {
+        let restored = restore_feasibility(problem, &point, options.restoration_options)?;
+        restoration_evaluations = restored.evaluations;
+        point = restored.point;
+        if restored.maximum_violation > options.feasibility_tolerance
+            || matches!(restored.termination,
+                FeasibilityRestorationTermination::IterationLimit
+                | FeasibilityRestorationTermination::Stalled)
+        {
+            let objective = problem.model.evaluate_objective(&point)?;
+            let constraints = problem.evaluate_constraints(&point)?;
+            return Ok(result(
+                point, objective, constraints,
+                vec![ConstraintMultiplier::default(); problem.constraints.len()],
+                0, restored.evaluations, 0, 0, options.merit_penalty, 0.0,
+                SqpTermination::RestorationFailed, problem,
+            ));
+        }
+    }
     let mut objective = problem.model.evaluate_objective(&point)?;
     let mut constraints = problem.evaluate_constraints(&point)?;
-    let mut evaluations = 1;
+    let mut evaluations = 1 + restoration_evaluations;
     let mut hessian = identity(n);
     let mut multipliers = vec![ConstraintMultiplier::default(); problem.constraints.len()];
     let mut penalty = options.merit_penalty;
     let mut accepted_steps = 0;
     let mut rejected_steps = 0;
     let mut last_step_norm = 0.0;
+    let mut filter = vec![(violation_sum(problem, &constraints), objective.value)];
 
     for iteration in 1..=options.max_iterations {
         let violation = maximum_violation(problem, &constraints);
@@ -236,7 +279,27 @@ where
             evaluations += 1;
             let trial_merit =
                 trial_objective.value + penalty * violation_sum(problem, &trial_constraints);
-            if trial_merit <= current_merit - options.armijo * alpha * predicted {
+            let trial_violation = violation_sum(problem, &trial_constraints);
+            let accepted_by_merit = trial_merit
+                <= current_merit - options.armijo * alpha * predicted;
+            let accepted_by_filter = filter.iter().all(|&(violation, value)| {
+                trial_violation <= (1.0 - options.filter_constraint_margin) * violation
+                    || trial_objective.value
+                        <= value - options.filter_objective_margin * violation
+            });
+            if match options.globalization {
+                SqpGlobalization::Merit => accepted_by_merit,
+                SqpGlobalization::Filter
+                    if violation_sum(problem, &constraints) <= options.feasibility_tolerance =>
+                {
+                    accepted_by_merit
+                }
+                SqpGlobalization::Filter => {
+                    accepted_by_filter
+                        && (trial_violation < violation_sum(problem, &constraints)
+                            || accepted_by_merit)
+                }
+            } {
                 accepted = Some((trial, trial_objective, trial_constraints));
                 break;
             }
@@ -260,6 +323,13 @@ where
             ));
         };
         accepted_steps += 1;
+        if options.globalization == SqpGlobalization::Filter {
+            let new_pair = (violation_sum(problem, &new_constraints), new_objective.value);
+            filter.retain(|&(violation, value)| {
+                violation < new_pair.0 || value < new_pair.1
+            });
+            filter.push(new_pair);
+        }
         let actual_step: Vec<f64> = new_point.iter().zip(&point).map(|(a, b)| a - b).collect();
         let new_lagrangian = lagrangian_gradient(
             problem,
@@ -580,6 +650,10 @@ fn validate_options(options: SqpOptions) -> Result<(), OptimizeError> {
         || !(0.0..1.0).contains(&options.backtracking)
         || !options.hessian_regularization.is_finite()
         || options.hessian_regularization <= 0.0
+        || !options.filter_constraint_margin.is_finite()
+        || !(0.0..1.0).contains(&options.filter_constraint_margin)
+        || !options.filter_objective_margin.is_finite()
+        || options.filter_objective_margin <= 0.0
     {
         return Err(OptimizeError::InvalidConfiguration("invalid SQP options"));
     }
@@ -682,5 +756,21 @@ mod tests {
         assert_eq!(result.termination, SqpTermination::Converged);
         assert!((result.point[0] - 1.0).abs() < 1e-5);
         assert!(result.multipliers[0].upper > 0.0);
+    }
+
+    #[test]
+    fn filter_globalization_with_restoration_solves_infeasible_start() {
+        let objective = expression(vec![Parameter(0), Constant(2.0), Subtract(0, 1), Powf(2, 2.0)]);
+        let constraint = expression(vec![Parameter(0)]);
+        let problem = ConstrainedNonlinearProblem {
+            model: NonlinearModel::objective(1, vec![Bound::free()], objective),
+            constraints: vec![NonlinearConstraint { expression: constraint,
+                bound: Bound { lower: Some(1.0), upper: None } }],
+        };
+        let result = minimize_sqp(&problem, &[0.0], SqpOptions {
+            restoration: true, globalization: SqpGlobalization::Filter, ..Default::default()
+        }).unwrap();
+        assert_eq!(result.termination, SqpTermination::Converged, "{result:?}");
+        assert!(result.point[0] >= 1.0 - 1e-7);
     }
 }
