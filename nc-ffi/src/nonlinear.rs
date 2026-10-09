@@ -13,9 +13,10 @@ use nc_optimize::{
     NonlinearConstraint, NonlinearExpression, NonlinearInteriorPointOptions,
     NonlinearInteriorPointResult, NonlinearInteriorPointTermination, NonlinearLeastSquaresOptions,
     NonlinearLeastSquaresResult, NonlinearModel, NonlinearNode, NonlinearRelaxationStrategy,
-    NonlinearTermination, QuadraticOptions, RobustLoss, SqpGlobalization, SqpOptions, SqpResult,
-    SqpTermination, FeasibilityRestorationOptions, FeasibilityRestorationTermination,
-    restore_feasibility,
+    NonlinearTermination, QuadraticOptions, RobustLoss, SqpCurvature, SqpGlobalization,
+    SqpOptions, SqpResult, SqpTermination, FeasibilityRestorationOptions,
+    FeasibilityRestorationTermination,
+    restore_feasibility, solve_sparse_kkt, SparseHessian, SparseJacobian, SparseKktProblem,
 };
 
 #[derive(Debug, Clone, Copy, uniffi::Record)]
@@ -323,10 +324,14 @@ pub struct FfiSqpOptions {
     pub globalization: FfiSqpGlobalization,
     pub filter_constraint_margin: f64,
     pub filter_objective_margin: f64,
+    pub curvature: FfiSqpCurvature,
 }
 
 #[derive(Debug, Clone, Copy, uniffi::Enum)]
 pub enum FfiSqpGlobalization { Merit, Filter }
+
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum FfiSqpCurvature { Bfgs, ExactLagrangian }
 
 #[derive(Debug, Clone, Copy, uniffi::Enum)]
 pub enum FfiSqpTermination {
@@ -370,6 +375,32 @@ pub struct FfiSparseJacobian {
     pub row_pointers: Vec<u64>,
     pub column_indices: Vec<u64>,
     pub values: Vec<f64>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiSecondOrderValue {
+    pub value: f64,
+    pub gradient: Vec<f64>,
+    /// Row-major square Hessian.
+    pub hessian: Vec<f64>,
+    pub dimension: u64,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiSparseHessian {
+    pub dimension: u64,
+    pub row_pointers: Vec<u64>,
+    pub column_indices: Vec<u64>,
+    pub values: Vec<f64>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiSparseKktResult {
+    pub primal: Vec<f64>,
+    pub dual: Vec<f64>,
+    pub residual_norm: f64,
+    pub relative_residual: f64,
+    pub factor_nonzeros: u64,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -865,6 +896,10 @@ pub fn solve_sqp(
         },
         filter_constraint_margin: options.filter_constraint_margin,
         filter_objective_margin: options.filter_objective_margin,
+        curvature: match options.curvature {
+            FfiSqpCurvature::Bfgs => SqpCurvature::Bfgs,
+            FfiSqpCurvature::ExactLagrangian => SqpCurvature::ExactLagrangian,
+        },
     };
     Ok(sqp_result(minimize_sqp(&problem, &initial, options)?))
 }
@@ -901,6 +936,111 @@ fn sqp_result(value: SqpResult) -> FfiSqpResult {
             SqpTermination::Cancelled => FfiSqpTermination::Cancelled,
         },
     }
+}
+
+#[uniffi::export]
+pub fn evaluate_nonlinear_objective_second_order(
+    model_value: FfiNonlinearModel,
+    parameters: Vec<f64>,
+) -> Result<FfiSecondOrderValue, FfiError> {
+    let model = model(model_value);
+    model.validate()?;
+    let value = model.objective.as_ref()
+        .ok_or_else(|| nc_optimize::OptimizeError::InvalidProblem(
+            "model does not contain an objective".into()))?
+        .evaluate_second_order(&parameters)?;
+    let dimension = value.gradient.len();
+    Ok(FfiSecondOrderValue { value: value.value, gradient: value.gradient,
+        hessian: value.hessian.into_iter().flatten().collect(), dimension: dimension as u64 })
+}
+
+#[uniffi::export]
+pub fn evaluate_nonlinear_objective_sparse_hessian(
+    model_value: FfiNonlinearModel,
+    parameters: Vec<f64>,
+    zero_tolerance: f64,
+) -> Result<FfiSparseHessian, FfiError> {
+    let model = model(model_value);
+    model.validate()?;
+    let (_, _, value) = model.objective.as_ref()
+        .ok_or_else(|| nc_optimize::OptimizeError::InvalidProblem(
+            "model does not contain an objective".into()))?
+        .evaluate_sparse_hessian(&parameters, zero_tolerance)?;
+    Ok(ffi_sparse_hessian(value))
+}
+
+#[uniffi::export]
+pub fn evaluate_nonlinear_objective_hessian_vector_product(
+    model_value: FfiNonlinearModel,
+    parameters: Vec<f64>,
+    direction: Vec<f64>,
+) -> Result<Vec<f64>, FfiError> {
+    let model = model(model_value);
+    model.validate()?;
+    Ok(model.objective.as_ref()
+        .ok_or_else(|| nc_optimize::OptimizeError::InvalidProblem(
+            "model does not contain an objective".into()))?
+        .hessian_vector_product(&parameters, &direction)?)
+}
+
+#[uniffi::export]
+pub fn evaluate_nonlinear_lagrangian_hessian_vector_product(
+    model_value: FfiNonlinearModel,
+    constraints: Vec<FfiNonlinearConstraint>,
+    parameters: Vec<f64>,
+    constraint_weights: Vec<f64>,
+    direction: Vec<f64>,
+) -> Result<Vec<f64>, FfiError> {
+    let problem = ConstrainedNonlinearProblem {
+        model: model(model_value),
+        constraints: constraints.into_iter().map(|value| NonlinearConstraint {
+            expression: expression(value.expression), bound: bound(value.bound),
+        }).collect(),
+    };
+    Ok(problem.lagrangian_hessian_vector_product(
+        &parameters, &constraint_weights, &direction)?)
+}
+
+#[uniffi::export]
+pub fn solve_nonlinear_sparse_kkt(
+    hessian: FfiSparseHessian,
+    jacobian: FfiSparseJacobian,
+    primal_rhs: Vec<f64>,
+    constraint_rhs: Vec<f64>,
+    primal_regularization: f64,
+    dual_regularization: f64,
+    drop_tolerance: f64,
+) -> Result<FfiSparseKktResult, FfiError> {
+    let value = solve_sparse_kkt(&SparseKktProblem {
+        hessian: SparseHessian {
+            dimension: count(hessian.dimension, "Hessian dimension")?,
+            row_pointers: indices(hessian.row_pointers, "Hessian row pointers")?,
+            column_indices: indices(hessian.column_indices, "Hessian column indices")?,
+            values: hessian.values,
+        },
+        jacobian: SparseJacobian {
+            rows: count(jacobian.rows, "Jacobian rows")?,
+            columns: count(jacobian.columns, "Jacobian columns")?,
+            row_pointers: indices(jacobian.row_pointers, "Jacobian row pointers")?,
+            column_indices: indices(jacobian.column_indices, "Jacobian column indices")?,
+            values: jacobian.values,
+        },
+        primal_rhs, constraint_rhs, primal_regularization, dual_regularization, drop_tolerance,
+    })?;
+    Ok(FfiSparseKktResult { primal: value.primal, dual: value.dual,
+        residual_norm: value.residual_norm, relative_residual: value.relative_residual,
+        factor_nonzeros: value.factor_nonzeros as u64 })
+}
+
+fn ffi_sparse_hessian(value: SparseHessian) -> FfiSparseHessian {
+    FfiSparseHessian { dimension: value.dimension as u64,
+        row_pointers: value.row_pointers.into_iter().map(|value| value as u64).collect(),
+        column_indices: value.column_indices.into_iter().map(|value| value as u64).collect(),
+        values: value.values }
+}
+
+fn indices(values: Vec<u64>, label: &'static str) -> Result<Vec<usize>, FfiError> {
+    values.into_iter().map(|value| count(value, label)).collect()
 }
 
 fn sparse_derivative(value: nc_optimize::SparseDerivative) -> FfiSparseDerivative {

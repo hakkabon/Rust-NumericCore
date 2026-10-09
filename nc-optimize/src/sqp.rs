@@ -26,6 +26,7 @@ pub struct SqpOptions {
     pub globalization: SqpGlobalization,
     pub filter_constraint_margin: f64,
     pub filter_objective_margin: f64,
+    pub curvature: SqpCurvature,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +34,9 @@ pub enum SqpGlobalization {
     Merit,
     Filter,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqpCurvature { Bfgs, ExactLagrangian }
 
 impl Default for SqpOptions {
     fn default() -> Self {
@@ -53,6 +57,7 @@ impl Default for SqpOptions {
             globalization: SqpGlobalization::Merit,
             filter_constraint_margin: 1e-4,
             filter_objective_margin: 1e-4,
+            curvature: SqpCurvature::Bfgs,
         }
     }
 }
@@ -182,6 +187,9 @@ where
             ));
         }
 
+        if options.curvature == SqpCurvature::ExactLagrangian {
+            hessian = problem.lagrangian_hessian(&point, &lagrangian_weights(&multipliers))?;
+        }
         regularize(&mut hessian, options.hessian_regularization);
         let qp =
             quadratic_subproblem(problem, &point, &objective.gradient, &constraints, &hessian)?;
@@ -342,12 +350,14 @@ where
             .zip(&old_lagrangian)
             .map(|(a, b)| a - b)
             .collect();
-        bfgs_update(
-            &mut hessian,
-            &actual_step,
-            &y,
-            options.hessian_regularization,
-        );
+        if options.curvature == SqpCurvature::Bfgs {
+            bfgs_update(
+                &mut hessian,
+                &actual_step,
+                &y,
+                options.hessian_regularization,
+            );
+        }
         point = new_point;
         objective = new_objective;
         constraints = new_constraints;
@@ -550,6 +560,12 @@ fn lagrangian_gradient(
         add_scaled(&mut gradient, &value.gradient, scale);
     }
     gradient
+}
+
+fn lagrangian_weights(multipliers: &[ConstraintMultiplier]) -> Vec<f64> {
+    multipliers.iter().map(|value| {
+        if value.equality != 0.0 { value.equality } else { value.upper - value.lower }
+    }).collect()
 }
 
 fn stationarity_norm(
@@ -772,5 +788,21 @@ mod tests {
         }).unwrap();
         assert_eq!(result.termination, SqpTermination::Converged, "{result:?}");
         assert!(result.point[0] >= 1.0 - 1e-7);
+    }
+
+    #[test]
+    fn exact_lagrangian_curvature_solves_nonlinear_inequality() {
+        let objective = expression(vec![Parameter(0), Constant(2.0), Subtract(0, 1), Powf(2, 2.0)]);
+        let constraint = expression(vec![Parameter(0), Powf(0, 2.0)]);
+        let problem = ConstrainedNonlinearProblem {
+            model: NonlinearModel::objective(1, vec![Bound::free()], objective),
+            constraints: vec![NonlinearConstraint { expression: constraint,
+                bound: Bound { lower: None, upper: Some(1.0) } }],
+        };
+        let result = minimize_sqp(&problem, &[0.5], SqpOptions {
+            curvature: SqpCurvature::ExactLagrangian, ..Default::default()
+        }).unwrap();
+        assert_eq!(result.termination, SqpTermination::Converged, "{result:?}");
+        assert!((result.point[0] - 1.0).abs() < 1e-5);
     }
 }

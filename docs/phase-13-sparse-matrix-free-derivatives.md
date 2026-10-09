@@ -18,7 +18,7 @@ dimensions and exports both matrix-free products. Swift and Rust therefore use
 the same model graph and expose matching derivative semantics without foreign
 callbacks in numerical hot loops.
 
-This phase supplies derivative representation and products, not a new solver.
-Existing dense solver contracts remain unchanged. A later phase can consume
-these primitives in iterative nonlinear solvers, add sparsity-pattern caching
-and coloring, and introduce second-order Hessian-vector products.
+This phase supplies the first-order representation and products. Phase 22 adds
+exact graph Hessians, Hessian-vector products, and sparse KKT systems. Future
+work can add sparsity-pattern caching, coloring, and matrix-free nonlinear
+solver integration.

@@ -55,10 +55,15 @@ pub use nonlinear_model::{
 pub mod sparse_derivatives;
 pub use sparse_derivatives::{SparseDerivative, SparseJacobian};
 
+pub mod second_order;
+pub use second_order::{
+    solve_sparse_kkt, SecondOrderValue, SparseHessian, SparseKktProblem, SparseKktResult,
+};
+
 pub mod sqp;
 pub use sqp::{
-    minimize_sqp, minimize_sqp_with_observer, SqpGlobalization, SqpIteration, SqpOptions,
-    SqpResult, SqpTermination,
+    minimize_sqp, minimize_sqp_with_observer, SqpCurvature, SqpGlobalization, SqpIteration,
+    SqpOptions, SqpResult, SqpTermination,
 };
 
 pub mod feasibility_restoration;
