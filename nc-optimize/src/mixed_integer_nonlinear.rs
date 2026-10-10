@@ -13,7 +13,13 @@ pub enum NonlinearRelaxationStrategy {
     AugmentedLagrangian,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MinlpNodeSelection {
+    DepthFirst,
+    BestLocalBound,
+}
+
+#[derive(Debug, Clone)]
 pub struct MixedIntegerNonlinearOptions {
     pub max_nodes: usize,
     pub integer_tolerance: f64,
@@ -21,6 +27,9 @@ pub struct MixedIntegerNonlinearOptions {
     pub absolute_gap_tolerance: f64,
     pub relative_gap_tolerance: f64,
     pub relaxation_strategy: NonlinearRelaxationStrategy,
+    pub node_selection: MinlpNodeSelection,
+    pub enable_rounding_heuristic: bool,
+    pub initial_incumbent: Option<Vec<f64>>,
     pub sqp_options: SqpOptions,
     pub constrained_options: ConstrainedOptions,
     pub unconstrained_options: LbfgsOptions,
@@ -35,6 +44,9 @@ impl Default for MixedIntegerNonlinearOptions {
             absolute_gap_tolerance: 0.0,
             relative_gap_tolerance: 0.0,
             relaxation_strategy: NonlinearRelaxationStrategy::Sqp,
+            node_selection: MinlpNodeSelection::DepthFirst,
+            enable_rounding_heuristic: true,
+            initial_incumbent: None,
             sqp_options: SqpOptions::default(),
             constrained_options: ConstrainedOptions::default(),
             unconstrained_options: LbfgsOptions::default(),
@@ -95,6 +107,9 @@ pub struct MixedIntegerNonlinearResult {
     pub nodes_pruned_infeasible: usize,
     pub maximum_depth: usize,
     pub incumbents_found: usize,
+    pub heuristic_attempts: usize,
+    pub heuristic_successes: usize,
+    pub warm_incumbent_accepted: bool,
     pub best_relaxation_objective: Option<f64>,
     pub absolute_gap: Option<f64>,
     pub relative_gap: Option<f64>,
@@ -116,6 +131,7 @@ struct Node {
     bounds: Vec<Bound>,
     start: Vec<f64>,
     depth: usize,
+    local_bound: Option<f64>,
 }
 
 struct Relaxation {
@@ -145,7 +161,7 @@ where
     O: FnMut(MixedIntegerNonlinearIteration) -> bool,
 {
     problem.validate()?;
-    validate_options(options)?;
+    validate_options(&options)?;
     if initial.len() != problem.model.parameter_count || !initial.iter().all(|x| x.is_finite()) {
         return Err(invalid(
             "initial point must contain one finite value per parameter",
@@ -156,13 +172,19 @@ where
         bounds: problem.model.bounds.clone(),
         start: root_start,
         depth: 0,
+        local_bound: None,
     }];
-    let mut incumbent: Option<Relaxation> = None;
+    let mut incumbent = options.initial_incumbent.as_ref()
+        .map(|point| evaluate_integer_candidate(problem, point, options.integer_tolerance,
+            options.feasibility_tolerance)).transpose()?.flatten();
+    let warm_incumbent_accepted = incumbent.is_some();
     let mut nodes_explored = 0;
     let mut relaxations_solved = 0;
     let mut pruned = 0;
     let mut maximum_depth = 0;
-    let mut incumbents = 0;
+    let mut incumbents = usize::from(warm_incumbent_accepted);
+    let mut heuristic_attempts = 0;
+    let mut heuristic_successes = 0;
     let mut best_relaxation = None::<f64>;
     let mut relaxation_failures = 0;
     let mut local_gap_reached = false;
@@ -171,10 +193,17 @@ where
         if nodes_explored >= options.max_nodes {
             break;
         }
-        let node = nodes.pop().unwrap();
+        let node_index = match options.node_selection {
+            MinlpNodeSelection::DepthFirst => nodes.len() - 1,
+            MinlpNodeSelection::BestLocalBound => nodes.iter().enumerate().min_by(|a, b| {
+                a.1.local_bound.unwrap_or(f64::NEG_INFINITY)
+                    .total_cmp(&b.1.local_bound.unwrap_or(f64::NEG_INFINITY))
+            }).map(|item| item.0).unwrap(),
+        };
+        let node = nodes.swap_remove(node_index);
         nodes_explored += 1;
         maximum_depth = maximum_depth.max(node.depth);
-        let Some(relaxation) = solve_relaxation(problem, &node, options)? else {
+        let Some(relaxation) = solve_relaxation(problem, &node, &options)? else {
             relaxation_failures += 1;
             continue;
         };
@@ -194,6 +223,9 @@ where
                 pruned,
                 maximum_depth,
                 incumbents,
+                heuristic_attempts,
+                heuristic_successes,
+                warm_incumbent_accepted,
                 best_relaxation,
                 MixedIntegerNonlinearTermination::Cancelled,
             ));
@@ -201,6 +233,18 @@ where
         if relaxation.violation > options.feasibility_tolerance {
             pruned += 1;
             continue;
+        }
+        if options.enable_rounding_heuristic
+            && branching_parameter(problem, &relaxation.point, options.integer_tolerance).is_some()
+        {
+            heuristic_attempts += 1;
+            if let Some(candidate) = polish_rounded_candidate(problem, &relaxation, &options)? {
+                if incumbent.as_ref().is_none_or(|old| candidate.objective < old.objective) {
+                    incumbent = Some(candidate);
+                    incumbents += 1;
+                    heuristic_successes += 1;
+                }
+            }
         }
         if let Some(index) =
             branching_parameter(problem, &relaxation.point, options.integer_tolerance)
@@ -220,6 +264,7 @@ where
                         &node_with_lower(&node.bounds, index, upper_lower),
                     ),
                     depth: node.depth + 1,
+                    local_bound: Some(relaxation.objective),
                 });
             }
             if lower_valid {
@@ -230,6 +275,7 @@ where
                         &node_with_upper(&node.bounds, index, lower_upper),
                     ),
                     depth: node.depth + 1,
+                    local_bound: Some(relaxation.objective),
                 });
             }
         } else {
@@ -279,15 +325,70 @@ where
         pruned,
         maximum_depth,
         incumbents,
+        heuristic_attempts,
+        heuristic_successes,
+        warm_incumbent_accepted,
         best_relaxation,
         termination,
     ))
 }
 
+fn polish_rounded_candidate(
+    problem: &MixedIntegerNonlinearProblem,
+    relaxation: &Relaxation,
+    options: &MixedIntegerNonlinearOptions,
+) -> Result<Option<Relaxation>, OptimizeError> {
+    let mut bounds = problem.model.bounds.clone();
+    let mut start = relaxation.point.clone();
+    for index in 0..problem.is_integer.len() {
+        if problem.is_integer[index] {
+            let rounded = start[index].round();
+            if bounds[index].lower.is_some_and(|lower| rounded < lower)
+                || bounds[index].upper.is_some_and(|upper| rounded > upper)
+            {
+                return Ok(None);
+            }
+            bounds[index] = Bound::fixed(rounded);
+            start[index] = rounded;
+        }
+    }
+    let node = Node { bounds, start, depth: 0, local_bound: None };
+    let Some(candidate) = solve_relaxation(problem, &node, options)? else { return Ok(None) };
+    if candidate.violation > options.feasibility_tolerance { return Ok(None); }
+    Ok(Some(candidate))
+}
+
+fn evaluate_integer_candidate(
+    problem: &MixedIntegerNonlinearProblem,
+    point: &[f64],
+    integer_tolerance: f64,
+    feasibility_tolerance: f64,
+) -> Result<Option<Relaxation>, OptimizeError> {
+    if point.len() != problem.model.parameter_count || !point.iter().all(|x| x.is_finite()) {
+        return Err(invalid("initial incumbent must contain one finite value per parameter"));
+    }
+    for (index, (&x, bound)) in point.iter().zip(&problem.model.bounds).enumerate() {
+        if problem.is_integer[index] && (x - x.round()).abs() > integer_tolerance { return Ok(None); }
+        if bound.lower.is_some_and(|lower| x < lower - feasibility_tolerance)
+            || bound.upper.is_some_and(|upper| x > upper + feasibility_tolerance) { return Ok(None); }
+    }
+    let objective = problem.model.evaluate_objective(point)?;
+    let evaluated: Vec<_> = problem.constraints.iter()
+        .map(|constraint| constraint.expression.evaluate(point)).collect::<Result<_, _>>()?;
+    let violation = problem.constraints.iter().zip(&evaluated).fold(0.0_f64, |maximum,(constraint,item)| {
+        maximum.max(constraint.bound.lower.map_or(0.0, |lower| (lower-item.value).max(0.0)))
+            .max(constraint.bound.upper.map_or(0.0, |upper| (item.value-upper).max(0.0)))
+    });
+    if violation > feasibility_tolerance { return Ok(None); }
+    Ok(Some(Relaxation { point: point.to_vec(), objective: objective.value,
+        values: evaluated.iter().map(|item| item.value).collect(), multipliers: vec![],
+        violation, stationarity: objective.gradient.iter().map(|x| x.abs()).fold(0.0, f64::max) }))
+}
+
 fn solve_relaxation(
     problem: &MixedIntegerNonlinearProblem,
     node: &Node,
-    options: MixedIntegerNonlinearOptions,
+    options: &MixedIntegerNonlinearOptions,
 ) -> Result<Option<Relaxation>, OptimizeError> {
     let model = NonlinearModel {
         bounds: node.bounds.clone(),
@@ -429,6 +530,9 @@ fn finish(
     pruned: usize,
     depth: usize,
     incumbents: usize,
+    heuristic_attempts: usize,
+    heuristic_successes: usize,
+    warm_incumbent_accepted: bool,
     best_relaxation: Option<f64>,
     termination: MixedIntegerNonlinearTermination,
 ) -> MixedIntegerNonlinearResult {
@@ -458,6 +562,9 @@ fn finish(
         nodes_pruned_infeasible: pruned,
         maximum_depth: depth,
         incumbents_found: incumbents,
+        heuristic_attempts,
+        heuristic_successes,
+        warm_incumbent_accepted,
         best_relaxation_objective: best_relaxation,
         absolute_gap: gap,
         relative_gap: relative,
@@ -504,7 +611,7 @@ fn tighten_upper(bound: &mut Bound, value: f64) -> bool {
         .lower
         .is_none_or(|lower| lower <= bound.upper.unwrap())
 }
-fn validate_options(options: MixedIntegerNonlinearOptions) -> Result<(), OptimizeError> {
+fn validate_options(options: &MixedIntegerNonlinearOptions) -> Result<(), OptimizeError> {
     if options.max_nodes == 0
         || !options.integer_tolerance.is_finite()
         || options.integer_tolerance <= 0.0
@@ -662,5 +769,40 @@ mod tests {
         );
         assert!(result.absolute_gap.unwrap() <= 0.2);
         assert!(!result.global_optimality_certified);
+    }
+
+    #[test]
+    fn rounding_and_polishing_finds_an_early_incumbent() {
+        let problem = MixedIntegerNonlinearProblem {
+            model: NonlinearModel { parameter_count: 1,
+                bounds: vec![Bound { lower: Some(0.0), upper: Some(4.0) }],
+                objective: Some(shifted_square(2.4)), residuals: vec![] },
+            constraints: vec![], is_integer: vec![true],
+        };
+        let mut options = MixedIntegerNonlinearOptions::default();
+        options.max_nodes = 1;
+        let result = minimize_mixed_integer_nonlinear(&problem, &[1.0], options).unwrap();
+        assert_eq!(result.point, vec![2.0]);
+        assert_eq!(result.heuristic_attempts, 1);
+        assert_eq!(result.heuristic_successes, 1);
+        assert_eq!(result.termination, MixedIntegerNonlinearTermination::NodeLimit);
+    }
+
+    #[test]
+    fn validates_and_uses_a_warm_incumbent() {
+        let problem = MixedIntegerNonlinearProblem {
+            model: NonlinearModel { parameter_count: 1,
+                bounds: vec![Bound { lower: Some(0.0), upper: Some(4.0) }],
+                objective: Some(shifted_square(2.4)), residuals: vec![] },
+            constraints: vec![], is_integer: vec![true],
+        };
+        let mut options = MixedIntegerNonlinearOptions::default();
+        options.max_nodes = 1;
+        options.enable_rounding_heuristic = false;
+        options.initial_incumbent = Some(vec![3.0]);
+        let result = minimize_mixed_integer_nonlinear(&problem, &[1.0], options).unwrap();
+        assert!(result.warm_incumbent_accepted);
+        assert_eq!(result.point, vec![3.0]);
+        assert_eq!(result.incumbents_found, 1);
     }
 }

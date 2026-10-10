@@ -95,7 +95,8 @@ pub mod mixed_integer_nonlinear;
 pub use mixed_integer_nonlinear::{
     minimize_mixed_integer_nonlinear, minimize_mixed_integer_nonlinear_with_observer,
     MixedIntegerNonlinearIteration, MixedIntegerNonlinearOptions, MixedIntegerNonlinearProblem,
-    MixedIntegerNonlinearResult, MixedIntegerNonlinearTermination, NonlinearRelaxationStrategy,
+    MinlpNodeSelection, MixedIntegerNonlinearResult, MixedIntegerNonlinearTermination,
+    NonlinearRelaxationStrategy,
 };
 
 pub mod quadratic_program;

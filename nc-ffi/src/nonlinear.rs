@@ -10,6 +10,7 @@ use nc_optimize::{
     solve_model_least_squares_matrix_free, Bound,
     ConstrainedNonlinearProblem, ConstrainedOptions, ConstrainedResult, ConstrainedTermination,
     ConstraintMultiplier, LbfgsOptions, LbfgsResult, MatrixFreeLeastSquaresOptions,
+    MinlpNodeSelection,
     MixedIntegerNonlinearOptions,
     MixedIntegerNonlinearProblem, MixedIntegerNonlinearResult, MixedIntegerNonlinearTermination,
     NonlinearConstraint, NonlinearExpression, NonlinearInteriorPointOptions,
@@ -279,7 +280,13 @@ pub enum FfiNonlinearRelaxationStrategy {
     AugmentedLagrangian,
 }
 
-#[derive(Debug, Clone, Copy, uniffi::Record)]
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum FfiMinlpNodeSelection {
+    DepthFirst,
+    BestLocalBound,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiMixedIntegerNonlinearOptions {
     pub max_nodes: u64,
     pub integer_tolerance: f64,
@@ -287,6 +294,9 @@ pub struct FfiMixedIntegerNonlinearOptions {
     pub absolute_gap_tolerance: f64,
     pub relative_gap_tolerance: f64,
     pub relaxation_strategy: FfiNonlinearRelaxationStrategy,
+    pub node_selection: FfiMinlpNodeSelection,
+    pub enable_rounding_heuristic: bool,
+    pub initial_incumbent: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy, uniffi::Enum)]
@@ -312,6 +322,9 @@ pub struct FfiMixedIntegerNonlinearResult {
     pub nodes_pruned_infeasible: u64,
     pub maximum_depth: u64,
     pub incumbents_found: u64,
+    pub heuristic_attempts: u64,
+    pub heuristic_successes: u64,
+    pub warm_incumbent_accepted: bool,
     pub best_relaxation_objective: Option<f64>,
     pub absolute_gap: Option<f64>,
     pub relative_gap: Option<f64>,
@@ -841,6 +854,10 @@ pub fn solve_mixed_integer_nonlinear(
             NonlinearRelaxationStrategy::AugmentedLagrangian
         }
     };
+    let node_selection = match options.node_selection {
+        FfiMinlpNodeSelection::DepthFirst => MinlpNodeSelection::DepthFirst,
+        FfiMinlpNodeSelection::BestLocalBound => MinlpNodeSelection::BestLocalBound,
+    };
     let value = minimize_mixed_integer_nonlinear(
         &problem,
         &initial,
@@ -851,6 +868,10 @@ pub fn solve_mixed_integer_nonlinear(
             absolute_gap_tolerance: options.absolute_gap_tolerance,
             relative_gap_tolerance: options.relative_gap_tolerance,
             relaxation_strategy: strategy,
+            node_selection,
+            enable_rounding_heuristic: options.enable_rounding_heuristic,
+            initial_incumbent: (!options.initial_incumbent.is_empty())
+                .then_some(options.initial_incumbent),
             ..MixedIntegerNonlinearOptions::default()
         },
     )?;
@@ -880,6 +901,9 @@ fn mixed_integer_nonlinear_result(
         nodes_pruned_infeasible: value.nodes_pruned_infeasible as u64,
         maximum_depth: value.maximum_depth as u64,
         incumbents_found: value.incumbents_found as u64,
+        heuristic_attempts: value.heuristic_attempts as u64,
+        heuristic_successes: value.heuristic_successes as u64,
+        warm_incumbent_accepted: value.warm_incumbent_accepted,
         best_relaxation_objective: value.best_relaxation_objective,
         absolute_gap: value.absolute_gap,
         relative_gap: value.relative_gap,
