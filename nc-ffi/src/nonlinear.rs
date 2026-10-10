@@ -6,9 +6,11 @@
 use crate::FfiError;
 use nc_optimize::{
     minimize_constrained, minimize_mixed_integer_nonlinear, minimize_model_lbfgsb,
-    minimize_nonlinear_interior_point, minimize_sqp, solve_model_least_squares, Bound,
+    minimize_nonlinear_interior_point, minimize_sqp, solve_model_least_squares,
+    solve_model_least_squares_matrix_free, Bound,
     ConstrainedNonlinearProblem, ConstrainedOptions, ConstrainedResult, ConstrainedTermination,
-    ConstraintMultiplier, LbfgsOptions, LbfgsResult, MixedIntegerNonlinearOptions,
+    ConstraintMultiplier, LbfgsOptions, LbfgsResult, MatrixFreeLeastSquaresOptions,
+    MixedIntegerNonlinearOptions,
     MixedIntegerNonlinearProblem, MixedIntegerNonlinearResult, MixedIntegerNonlinearTermination,
     NonlinearConstraint, NonlinearExpression, NonlinearInteriorPointOptions,
     NonlinearInteriorPointResult, NonlinearInteriorPointTermination, NonlinearLeastSquaresOptions,
@@ -165,6 +167,21 @@ pub struct FfiNonlinearLeastSquaresResult {
     pub final_damping: f64,
     pub accepted_steps: u64,
     pub rejected_steps: u64,
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Record)]
+pub struct FfiMatrixFreeLeastSquaresOptions {
+    pub outer: FfiNonlinearLeastSquaresOptions,
+    pub max_krylov_iterations: u64,
+    pub krylov_tolerance: f64,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiMatrixFreeLeastSquaresResult {
+    pub solution: FfiNonlinearLeastSquaresResult,
+    pub krylov_iterations: u64,
+    pub jacobian_products: u64,
+    pub transpose_jacobian_products: u64,
 }
 
 #[derive(Debug, Clone, Copy, uniffi::Record)]
@@ -549,6 +566,46 @@ pub fn solve_nonlinear_least_squares(
     };
     let value = solve_model_least_squares(&model(model_value), &initial, &weights, loss, options)?;
     Ok(nls_result(value))
+}
+
+#[uniffi::export]
+pub fn solve_nonlinear_least_squares_matrix_free(
+    model_value: FfiNonlinearModel,
+    initial: Vec<f64>,
+    weights: Vec<f64>,
+    loss: FfiRobustLoss,
+    options: FfiMatrixFreeLeastSquaresOptions,
+) -> Result<FfiMatrixFreeLeastSquaresResult, FfiError> {
+    let loss = match loss.kind {
+        FfiRobustLossKind::Squared => RobustLoss::Squared,
+        FfiRobustLossKind::Huber => RobustLoss::Huber { scale: loss.scale },
+        FfiRobustLossKind::Cauchy => RobustLoss::Cauchy { scale: loss.scale },
+    };
+    let o = options.outer;
+    let outer = NonlinearLeastSquaresOptions {
+        max_iterations: count(o.max_iterations, "max_iterations")?,
+        gradient_tolerance: o.gradient_tolerance,
+        step_tolerance: o.step_tolerance,
+        cost_tolerance: o.cost_tolerance,
+        initial_damping: o.initial_damping,
+        damping_increase: o.damping_increase,
+        damping_decrease: o.damping_decrease,
+        max_damping_iterations: count(o.max_damping_iterations, "max_damping_iterations")?,
+    };
+    let value = solve_model_least_squares_matrix_free(
+        &model(model_value), &initial, &weights, loss,
+        MatrixFreeLeastSquaresOptions {
+            outer,
+            max_krylov_iterations: count(options.max_krylov_iterations, "max_krylov_iterations")?,
+            krylov_tolerance: options.krylov_tolerance,
+        },
+    )?;
+    Ok(FfiMatrixFreeLeastSquaresResult {
+        solution: nls_result(value.solution),
+        krylov_iterations: value.krylov_iterations as u64,
+        jacobian_products: value.jacobian_products as u64,
+        transpose_jacobian_products: value.transpose_jacobian_products as u64,
+    })
 }
 
 fn nls_result(value: NonlinearLeastSquaresResult) -> FfiNonlinearLeastSquaresResult {

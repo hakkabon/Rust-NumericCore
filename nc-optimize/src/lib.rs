@@ -42,6 +42,11 @@ pub use nonlinear_least_squares::{
     NonlinearLeastSquaresIteration, NonlinearLeastSquaresOptions, NonlinearLeastSquaresResult,
     RobustLoss,
 };
+pub mod matrix_free_least_squares;
+pub use matrix_free_least_squares::{
+    solve_model_least_squares_matrix_free, MatrixFreeLeastSquaresOptions,
+    MatrixFreeLeastSquaresResult,
+};
 
 pub mod derivative_check;
 pub use derivative_check::{check_gradient, check_jacobian, DerivativeCheckReport};

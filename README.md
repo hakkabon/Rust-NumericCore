@@ -88,6 +88,9 @@ rustup target add aarch64-apple-ios aarch64-apple-ios-sim \
 ./scripts/build-xcframework.sh
 ```
 
+Phase 23 also provides matrix-free nonlinear least squares using damped
+Gauss–Newton systems and `Jv`/`Jᵀv` Krylov products.
+
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's
 module boundaries.
