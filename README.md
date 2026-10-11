@@ -93,6 +93,9 @@ validated warm incumbents, and best-local-bound node ordering.
 Phase 25 deepens LP/QP/MILP production behavior with periodic simplex basis
 reconstruction, residual-balanced ADMM penalties, and validated MILP rounding
 incumbents with search metrics.
+Phase 26 adds structured numerical evidence: scale-aware metrics, independent
+backward-error checks, deterministic perturbations, and an audited
+LP/QP/MILP/nonlinear reference program run in pull-request CI.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

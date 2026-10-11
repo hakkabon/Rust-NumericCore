@@ -109,6 +109,13 @@ pub use quadratic_program::{
 pub mod scaling;
 pub use scaling::{ScaledProblem, ScaledSolver, ScalingOptions, ScalingReport};
 
+pub mod validation_program;
+pub use validation_program::run_reference_validation;
+
+pub mod validation;
+pub use validation::{deterministic_perturbation, validate_linear_system, LinearSystemValidation,
+    ValidationCase, ValidationMetric, ValidationReport, ValidationTolerance};
+
 /// Bound on a variable or constraint. `None` means unbounded in that
 /// direction (`-inf` / `+inf`).
 #[derive(Debug, Clone, Copy, PartialEq)]
