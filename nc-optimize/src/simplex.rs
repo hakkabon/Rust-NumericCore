@@ -30,7 +30,8 @@
 //! ## Scope, deliberately
 //! - **Dense**, not sparse-with-factorization-updates. `Binv` (the
 //!   explicit basis inverse) is a full `m x m` matrix, updated via
-//!   standard Gauss-Jordan pivoting each iteration, and reduced costs
+//!   standard Gauss-Jordan pivoting and rebuilt from the current basis
+//!   every 64 pivots to limit accumulated roundoff. Reduced costs
 //!   are recomputed from scratch every iteration rather than maintained
 //!   incrementally with an eta-file/product-form-of-inverse scheme. This
 //!   matches the "simplex does well for smallish problems" framing this
@@ -38,11 +39,9 @@
 //!   version is real future work if a large-problem need shows up, not
 //!   a design mistake to fix reflexively.
 //! - **Dantzig's rule** (largest-reduced-cost-magnitude) for entering
-//!   variable selection, first-blocking-row for leaving. No Bland's-rule
-//!   anti-cycling safeguard beyond an iteration cap — degenerate cycling
-//!   is rare for well-posed smallish problems, and the cap
-//!   (`max_iterations`, reported as `SolveStatus::IterationLimit` if
-//!   hit) is the safety net. Revisit if cycling shows up in practice.
+//!   variable selection, first-blocking-row for leaving. Repeated basis
+//!   states switch the run to Bland's rule; the iteration cap remains the
+//!   final safety net.
 //! - Three-state nonbasic status (`AtLower`/`AtUpper`/`Free`) so a
 //!   variable with one or both bounds absent (reachable today — e.g.
 //!   `NumericCoreAMPL`'s `var y <= 10;` leaves the lower bound
@@ -299,6 +298,7 @@ impl Workspace {
     ) -> Result<PhaseOutcome, OptimizeError> {
         let mut seen_states = HashSet::new();
         let mut bland_mode = false;
+        let mut pivots_since_refactorization = 0usize;
         for _ in 0..max_iterations {
             let state: Vec<(usize, u8)> = self.basis.iter().copied().map(|basic| {
                 let status = match self.nb_status[basic] {
@@ -437,9 +437,47 @@ impl Workspace {
                 self.is_basic[q] = true;
                 self.basis[r] = q;
                 self.pivot(&alpha, r);
+                pivots_since_refactorization += 1;
+                if pivots_since_refactorization == 64 {
+                    self.refactor_basis()?;
+                    pivots_since_refactorization = 0;
+                }
             }
         }
         Ok(PhaseOutcome::IterationLimit)
+    }
+
+    /// Rebuild the explicit inverse periodically so rank-one pivot-update
+    /// roundoff cannot accumulate without bound on long or degenerate runs.
+    fn refactor_basis(&mut self) -> Result<(), OptimizeError> {
+        let mut augmented = vec![vec![0.0; 2 * self.m]; self.m];
+        for row in 0..self.m {
+            for column in 0..self.m {
+                augmented[row][column] = self.matrix[row][self.basis[column]];
+            }
+            augmented[row][self.m + row] = 1.0;
+        }
+        for column in 0..self.m {
+            let pivot = (column..self.m).max_by(|&a, &b| {
+                augmented[a][column].abs().total_cmp(&augmented[b][column].abs())
+            }).unwrap();
+            if augmented[pivot][column].abs() <= 1e-14 {
+                return Err(OptimizeError::InvalidProblem(
+                    "revised simplex basis became numerically singular".into()));
+            }
+            augmented.swap(column, pivot);
+            let diagonal = augmented[column][column];
+            for value in &mut augmented[column] { *value /= diagonal; }
+            for row in 0..self.m {
+                if row == column { continue; }
+                let factor = augmented[row][column];
+                for entry in 0..2 * self.m {
+                    augmented[row][entry] -= factor * augmented[column][entry];
+                }
+            }
+        }
+        self.binv = augmented.into_iter().map(|row| row[self.m..].to_vec()).collect();
+        Ok(())
     }
 
     /// Phase 1's temporary cost vector — the subgradient of the total
@@ -534,6 +572,19 @@ mod tests {
         assert!((solution.variable_values[0] - 3.0).abs() < 1e-6, "x = {}", solution.variable_values[0]);
         assert!((solution.variable_values[1] - 1.0).abs() < 1e-6, "y = {}", solution.variable_values[1]);
         assert!((solution.objective_value - (-11.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn basis_refactorization_reconstructs_the_current_inverse() {
+        let problem = dense_problem(
+            vec![1.0, 1.0], vec![vec![1.0, 2.0], vec![3.0, 4.0]],
+            vec![Bound::free(), Bound::free()],
+            vec![Bound::free(), Bound::free()],
+        );
+        let mut workspace = Workspace::new(&problem).unwrap();
+        workspace.binv = vec![vec![7.0, 8.0], vec![9.0, 10.0]];
+        workspace.refactor_basis().unwrap();
+        assert_eq!(workspace.binv, vec![vec![-1.0, 0.0], vec![0.0, -1.0]]);
     }
 
     #[test]

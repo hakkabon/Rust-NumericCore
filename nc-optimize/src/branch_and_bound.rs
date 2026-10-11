@@ -103,6 +103,8 @@ pub struct BranchAndBoundSolver {
     /// Tighten variable bounds implied by singleton constraint rows before
     /// solving each node relaxation.
     pub bound_propagation: bool,
+    /// Try the nearest integer point from each fractional LP relaxation.
+    pub rounding_heuristic: bool,
     pub relaxation_solver: Box<dyn Solver>,
 }
 
@@ -121,6 +123,8 @@ pub struct BranchAndBoundReport {
     pub relaxations_solved: usize,
     pub bounds_tightened: usize,
     pub incumbents_found: usize,
+    pub heuristic_attempts: usize,
+    pub heuristic_successes: usize,
     pub termination: BranchAndBoundTermination,
 }
 
@@ -134,6 +138,7 @@ impl Default for BranchAndBoundSolver {
             node_selection: NodeSelection::BestBound,
             branching_strategy: BranchingStrategy::PseudoCost,
             bound_propagation: true,
+            rounding_heuristic: true,
             relaxation_solver: Box::new(RevisedSimplexSolver::default()),
         }
     }
@@ -355,6 +360,20 @@ impl BranchAndBoundSolver {
                 }
             }
 
+            if self.rounding_heuristic
+                && branching_variable(&relaxed, &problem.is_integer, self.integer_tolerance,
+                    BranchingStrategy::MostFractional, &pseudo_costs).is_some()
+            {
+                statistics.heuristic_attempts += 1;
+                if let Some(candidate) = rounded_incumbent(problem, &relaxed, self.integer_tolerance) {
+                    if incumbent.as_ref().is_none_or(|best| candidate.objective_value < best.objective_value) {
+                        incumbent = Some(candidate);
+                        statistics.incumbents_found += 1;
+                        statistics.heuristic_successes += 1;
+                    }
+                }
+            }
+
             match branching_variable(
                 &relaxed, &problem.is_integer, self.integer_tolerance,
                 self.branching_strategy, &pseudo_costs,
@@ -445,6 +464,16 @@ fn validated_incumbent(
     Ok(solution)
 }
 
+fn rounded_incumbent(problem: &Problem, relaxation: &Solution, tolerance: f64) -> Option<Solution> {
+    let mut values = relaxation.variable_values.clone();
+    for (index, integer) in problem.is_integer.iter().enumerate() {
+        if *integer { values[index] = values[index].round(); }
+    }
+    let objective_value = problem.objective.iter().zip(&values).map(|(c, x)| c * x).sum();
+    let candidate = Solution { variable_values: values, objective_value, status: SolveStatus::Optimal };
+    candidate.diagnostics(problem).is_verified(tolerance).then_some(candidate)
+}
+
 #[derive(Default, Clone, Copy)]
 struct SearchStatistics {
     nodes_pruned_infeasible: usize,
@@ -453,6 +482,8 @@ struct SearchStatistics {
     relaxations_solved: usize,
     bounds_tightened: usize,
     incumbents_found: usize,
+    heuristic_attempts: usize,
+    heuristic_successes: usize,
 }
 
 fn pop_node(frontier: &mut Vec<NodeBounds>, selection: NodeSelection) -> NodeBounds {
@@ -502,6 +533,8 @@ fn report(
         relaxations_solved: statistics.relaxations_solved,
         bounds_tightened: statistics.bounds_tightened,
         incumbents_found: statistics.incumbents_found,
+        heuristic_attempts: statistics.heuristic_attempts,
+        heuristic_successes: statistics.heuristic_successes,
         termination,
     }
 }
@@ -835,6 +868,7 @@ mod tests {
             node_selection: NodeSelection::DepthFirst,
             branching_strategy: BranchingStrategy::MostFractional,
             bound_propagation: true,
+            rounding_heuristic: false,
             relaxation_solver: Box::new(RevisedSimplexSolver::default()),
         };
         let report = solver.solve_with_report(&problem).unwrap();
@@ -936,5 +970,23 @@ mod tests {
         }, 13.0);
         let score = costs.score(0, 0.25).unwrap();
         assert!((score - 1.3).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rounding_heuristic_reports_a_valid_incumbent() {
+        let problem = dense_problem(
+            vec![-2.0, -1.0], vec![vec![1.0, 1.0]],
+            vec![Bound { lower: None, upper: Some(1.4) }],
+            vec![
+                Bound { lower: Some(0.0), upper: Some(1.0) },
+                Bound { lower: Some(0.0), upper: Some(1.0) },
+            ],
+            vec![true, true],
+        );
+        let report = BranchAndBoundSolver::default().solve_with_report(&problem).unwrap();
+        assert!(report.heuristic_attempts > 0);
+        assert!(report.heuristic_successes > 0);
+        assert_eq!(report.solution.objective_value, -2.0);
+        assert!(report.solution.diagnostics(&problem).is_verified(1e-8));
     }
 }

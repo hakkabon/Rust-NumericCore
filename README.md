@@ -92,6 +92,9 @@ Phase 23 also provides matrix-free nonlinear least squares using damped
 Gauss–Newton systems and `Jv`/`Jᵀv` Krylov products.
 Phase 24 strengthens local MINLP search with rounded-and-polished incumbents,
 validated warm incumbents, and best-local-bound node ordering.
+Phase 25 deepens LP/QP/MILP production behavior with periodic simplex basis
+reconstruction, residual-balanced ADMM penalties, and validated MILP rounding
+incumbents with search metrics.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

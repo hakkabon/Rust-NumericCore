@@ -733,6 +733,7 @@ pub struct FfiBranchAndBoundOptions {
     pub node_selection: FfiNodeSelection,
     pub branching_strategy: FfiBranchingStrategy,
     pub bound_propagation: bool,
+    pub rounding_heuristic: bool,
 }
 
 /// MILP result plus the search certificate available at termination.
@@ -749,6 +750,8 @@ pub struct FfiMilpSolveResult {
     pub relaxations_solved: u64,
     pub bounds_tightened: u64,
     pub incumbents_found: u64,
+    pub heuristic_attempts: u64,
+    pub heuristic_successes: u64,
     pub termination: FfiBranchAndBoundTermination,
 }
 
@@ -913,6 +916,7 @@ pub fn solve_milp_branch_and_bound_with_options(
             FfiBranchingStrategy::PseudoCost => nc_optimize::BranchingStrategy::PseudoCost,
         },
         bound_propagation: options.bound_propagation,
+        rounding_heuristic: options.rounding_heuristic,
         relaxation_solver: Box::new(nc_optimize::RevisedSimplexSolver::default()),
     };
     let scaled = options.scaling.then(|| nc_optimize::ScaledProblem::new(
@@ -943,6 +947,8 @@ pub fn solve_milp_branch_and_bound_with_options(
         relaxations_solved: report.relaxations_solved as u64,
         bounds_tightened: report.bounds_tightened as u64,
         incumbents_found: report.incumbents_found as u64,
+        heuristic_attempts: report.heuristic_attempts as u64,
+        heuristic_successes: report.heuristic_successes as u64,
         termination: match report.termination {
             nc_optimize::BranchAndBoundTermination::Exhausted => FfiBranchAndBoundTermination::Exhausted,
             nc_optimize::BranchAndBoundTermination::GapSatisfied => FfiBranchAndBoundTermination::GapSatisfied,
@@ -1499,6 +1505,7 @@ mod tests {
                 node_selection: FfiNodeSelection::BestBound,
                 branching_strategy: FfiBranchingStrategy::PseudoCost,
                 bound_propagation: true,
+                rounding_heuristic: true,
             },
         ).unwrap();
         assert_eq!(report.solution.status, FfiSolveStatus::Optimal);
@@ -1509,6 +1516,8 @@ mod tests {
         assert_eq!(report.relative_gap, Some(0.0));
         assert_eq!(report.termination, FfiBranchAndBoundTermination::Exhausted);
         assert_eq!(report.relaxations_solved, 1);
+        assert_eq!(report.heuristic_attempts, 0);
+        assert_eq!(report.heuristic_successes, 0);
     }
 
     #[test]

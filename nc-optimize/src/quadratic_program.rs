@@ -192,13 +192,8 @@ where
         .chain(&problem.variable_bounds)
         .copied()
         .collect();
-    let mut system = problem.quadratic.clone();
-    for i in 0..n {
-        for j in 0..n {
-            system[i][j] += options.rho * (0..p).map(|r| c[r][i] * c[r][j]).sum::<f64>();
-        }
-    }
-    let Some(factor) = cholesky(&system) else {
+    let mut rho = options.rho;
+    let Some(mut factor) = factor_admm_system(problem, &c, rho) else {
         return Ok(failure(
             problem,
             vec![0.0; n],
@@ -224,7 +219,7 @@ where
             w.row_dual
                 .iter()
                 .chain(&w.variable_dual)
-                .map(|v| v / options.rho)
+                .map(|v| v / rho)
                 .collect(),
         )
     } else {
@@ -243,7 +238,7 @@ where
         let rhs: Vec<f64> = (0..n)
             .map(|j| {
                 -problem.linear[j]
-                    + options.rho * (0..p).map(|r| c[r][j] * (z[r] - y[r])).sum::<f64>()
+                    + rho * (0..p).map(|r| c[r][j] * (z[r] - y[r])).sum::<f64>()
             })
             .collect();
         x = solve_cholesky(&factor, &rhs);
@@ -268,10 +263,10 @@ where
         }
         last_primal = inf_norm(&cx.iter().zip(&z).map(|(a, b)| a - b).collect::<Vec<_>>());
         let z_change: Vec<f64> = z.iter().zip(&old_z).map(|(a, b)| a - b).collect();
-        last_dual = options.rho * inf_norm(&transpose_matvec(&c, &z_change));
+        last_dual = rho * inf_norm(&transpose_matvec(&c, &z_change));
         let eps_primal = options.absolute_tolerance
             + options.relative_tolerance * inf_norm(&cx).max(inf_norm(&z));
-        let lambda: Vec<f64> = y.iter().map(|v| options.rho * v).collect();
+        let lambda: Vec<f64> = y.iter().map(|v| rho * v).collect();
         let qx = matvec(&problem.quadratic, &x);
         let ctl = transpose_matvec(&c, &lambda);
         let eps_dual = options.absolute_tolerance
@@ -306,8 +301,24 @@ where
                 last_dual,
             ));
         }
+        if iteration % 25 == 0 {
+            let next_rho = if last_primal > 10.0 * last_dual {
+                (rho * 2.0).min(1e8)
+            } else if last_dual > 10.0 * last_primal {
+                (rho * 0.5).max(1e-8)
+            } else { rho };
+            if next_rho != rho {
+                let scale = rho / next_rho;
+                for value in &mut y { *value *= scale; }
+                rho = next_rho;
+                let Some(next_factor) = factor_admm_system(problem, &c, rho) else {
+                    return Ok(failure(problem, x, iteration, QuadraticTermination::NumericalFailure));
+                };
+                factor = next_factor;
+            }
+        }
     }
-    let lambda: Vec<f64> = y.iter().map(|v| options.rho * v).collect();
+    let lambda: Vec<f64> = y.iter().map(|v| rho * v).collect();
     Ok(make_result(
         problem,
         x,
@@ -317,6 +328,16 @@ where
         last_primal,
         last_dual,
     ))
+}
+
+fn factor_admm_system(problem: &QuadraticProblem, c: &[Vec<f64>], rho: f64)
+    -> Option<Vec<Vec<f64>>> {
+    let n = problem.linear.len();
+    let mut system = problem.quadratic.clone();
+    for i in 0..n { for j in 0..n {
+        system[i][j] += rho * c.iter().map(|row| row[i] * row[j]).sum::<f64>();
+    }}
+    cholesky(&system)
 }
 
 fn make_result(
@@ -517,5 +538,21 @@ mod tests {
             variable_bounds: vec![Bound::free()],
         };
         assert!(solve_convex_qp(&p, Default::default()).is_err())
+    }
+
+    #[test]
+    fn adaptive_penalty_recovers_from_a_small_initial_rho() {
+        let p = QuadraticProblem {
+            quadratic: vec![vec![2.0]],
+            linear: vec![-4.0],
+            constant: 0.0,
+            constraints: empty(1),
+            row_bounds: vec![],
+            variable_bounds: vec![Bound { lower: Some(0.0), upper: Some(1.0) }],
+        };
+        let options = QuadraticOptions { max_iterations: 2_000, rho: 1e-8, ..Default::default() };
+        let result = solve_convex_qp(&p, options).unwrap();
+        assert_eq!(result.termination, QuadraticTermination::Converged);
+        assert!((result.point[0] - 1.0).abs() < 1e-5);
     }
 }
