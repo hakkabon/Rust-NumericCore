@@ -4,15 +4,12 @@ name: Build & release XCFramework
 # FFI artifact. Triggered on a version tag push (e.g. `v0.1.0`):
 # builds NumericCoreFFI.xcframework + the UniFFI Swift bindings,
 # publishes both as release assets, and notifies Swift-NumericCore so
-# its `update-ffi` workflow can vendor the new framework automatically.
+# its `update-ffi` workflow can update the remote pin and bindings.
 #
-# Swift-NumericCore consumes this release in two ways (see its
-# docs/decisions/0009-local-binary-target-for-ffi.md):
-#   1. today: vendored copy under Frameworks/ + Generated/, refreshed by
-#      its `update-ffi` workflow (triggered below via repository_dispatch
-#      and, as a fallback, by its own schedule polling `latest`);
-#   2. later: remote binaryTarget URL + checksum (both printed into this
-#      release's body by the `checksum` step).
+# Swift-NumericCore consumes the XCFramework through a checksummed remote
+# binaryTarget and commits the matching generated Swift binding. Its updater
+# is triggered below via repository_dispatch, with scheduled polling as a
+# fallback.
 
 on:
   push:
@@ -73,7 +70,7 @@ jobs:
           body: |
             NumericCoreFFI XCFramework + UniFFI Swift bindings for ${{ github.ref_name }}.
 
-            ## Swift-NumericCore: remote binaryTarget (when ADR 0009 flips)
+            ## Swift-NumericCore: remote binaryTarget
             ```swift
             .binaryTarget(
                 name: "NumericCoreFFI",
@@ -82,17 +79,15 @@ jobs:
             ),
             ```
 
-            ## Swift-NumericCore: vendored update (current, ADR 0009)
+            ## Swift-NumericCore automated update
             The `update-ffi` workflow in Swift-NumericCore picks this tag up
             automatically. Manual equivalent:
-              1. download `NumericCoreFFI.xcframework.zip` and `nc_ffi.swift`
-                 from this release,
-              2. unzip the framework over `Frameworks/NumericCoreFFI.xcframework`
-                 (it must contain `Headers/module.modulemap` in every slice —
-                 without it `canImport(nc_ffiFFI)` fails and the link breaks
-                 with undefined `uniffi_*`/`ffi_*` symbols),
+              1. download both release assets,
+              2. recompute the archive checksum and update the remote
+                 `binaryTarget` URL/checksum in `Package.swift`,
               3. copy `nc_ffi.swift` into `Sources/NCBindings/Generated/`,
-              4. run `swift build` + `swift test`.
+              4. record this tag in `.ffi-version`,
+              5. run `swift build` + `swift test`.
 
       - name: Notify Swift-NumericCore
         # Best-effort: requires a PAT with repo scope stored as
@@ -107,6 +102,7 @@ jobs:
             exit 0
           fi
           curl -sS -X POST \
+            --fail-with-body \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${TOKEN}" \
             https://api.github.com/repos/hakkabon/Swift-NumericCore/dispatches \

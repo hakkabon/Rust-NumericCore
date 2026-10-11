@@ -72,12 +72,10 @@ release. See ADR 0010 for the full pipeline, including what happens if
 the dispatch token is missing or expired (degrades gracefully, not a
 hard failure).
 
-**No release has been tagged yet as of this writing** — the pipeline
-above is fully wired (both workflows exist, both are individually
-sound) but has never fired end-to-end as a complete system. `v0.1.0`
-will be its first real run; watch both repos' Actions tabs when you
-tag it, since a first real run is exactly when an untested interaction
-between two otherwise-correct pieces tends to surface.
+The release pipeline is in active use. Swift-NumericCore tracks completion
+with its root `.ffi-version` file rather than inferring synchronization from
+the version already present in `Package.swift`; this prevents a pre-pinned
+manifest from suppressing the generated-binding update PR.
 
 To build the XCFramework locally without tagging a release (e.g. to
 test a change before pushing):
