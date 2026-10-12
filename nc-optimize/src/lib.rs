@@ -75,6 +75,11 @@ pub use spatial_branch_and_bound::{
     SpatialTermination,
 };
 
+pub mod global_minlp;
+pub use global_minlp::{minimize_global_minlp, minimize_global_minlp_with_observer,
+    GlobalMinlpIteration, GlobalMinlpOptions, GlobalMinlpProblem, GlobalMinlpResult,
+    GlobalMinlpTermination};
+
 pub mod sparse_derivatives;
 pub use sparse_derivatives::{SparseDerivative, SparseJacobian};
 

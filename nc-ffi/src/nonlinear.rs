@@ -20,7 +20,9 @@ use nc_optimize::{
     SqpOptions, SqpResult, SqpTermination, FeasibilityRestorationOptions,
     FeasibilityRestorationTermination,
     restore_feasibility, solve_sparse_kkt, SparseHessian, SparseJacobian, SparseKktProblem,
-    minimize_spatial, propagate_nonlinear_bounds, NonlinearPropagationOptions,
+    minimize_spatial, minimize_global_minlp, propagate_nonlinear_bounds,
+    GlobalMinlpOptions, GlobalMinlpProblem, GlobalMinlpResult, GlobalMinlpTermination,
+    NonlinearPropagationOptions,
     SpatialBranchAndBoundOptions, SpatialBranchAndBoundProblem,
     SpatialBranchAndBoundResult, SpatialTermination,
 };
@@ -391,6 +393,37 @@ pub struct FfiSpatialBranchAndBoundResult {
     pub maximum_depth: u64,
     pub global_optimality_certified: bool,
     pub termination: FfiSpatialTermination,
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Record)]
+pub struct FfiGlobalMinlpOptions {
+    pub max_nodes: u64,
+    pub minimum_width: f64,
+    pub integer_tolerance: f64,
+    pub feasibility_tolerance: f64,
+    pub absolute_gap_tolerance: f64,
+    pub relative_gap_tolerance: f64,
+    pub simplex_iterations: u64,
+    pub propagation_passes: u64,
+    pub propagation_tolerance: f64,
+    pub enable_rounding_heuristic: bool,
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum FfiGlobalMinlpTermination { GlobalGap, SearchExhausted, SpatialResolution,
+    NodeLimit, Infeasible, RelaxationFailure, Cancelled }
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiGlobalMinlpResult {
+    pub point: Vec<f64>, pub objective: f64, pub global_lower_bound: Option<f64>,
+    pub absolute_gap: Option<f64>, pub relative_gap: Option<f64>,
+    pub nodes_explored: u64, pub relaxations_solved: u64,
+    pub nodes_pruned_by_bound: u64, pub nodes_pruned_infeasible: u64,
+    pub nodes_pruned_by_propagation: u64, pub propagation_passes: u64,
+    pub bounds_tightened: u64, pub integer_branches: u64, pub spatial_branches: u64,
+    pub local_solves: u64, pub heuristic_attempts: u64, pub heuristic_successes: u64,
+    pub incumbents_found: u64, pub maximum_depth: u64,
+    pub global_optimality_certified: bool, pub termination: FfiGlobalMinlpTermination,
 }
 
 #[derive(Debug, Clone, Copy, uniffi::Record)]
@@ -968,6 +1001,61 @@ pub fn tighten_nonlinear_bounds(
 }
 
 #[uniffi::export]
+pub fn solve_global_minlp(
+    model_value: FfiNonlinearModel,
+    constraints: Vec<FfiNonlinearConstraint>,
+    is_integer: Vec<bool>,
+    options: FfiGlobalMinlpOptions,
+) -> Result<FfiGlobalMinlpResult, FfiError> {
+    let problem = GlobalMinlpProblem {
+        model: model(model_value),
+        constraints: constraints.into_iter().map(|value| NonlinearConstraint {
+            expression: expression(value.expression), bound: bound(value.bound),
+        }).collect(),
+        is_integer,
+    };
+    let value = minimize_global_minlp(&problem, GlobalMinlpOptions {
+        max_nodes: count(options.max_nodes, "max_nodes")?,
+        minimum_width: options.minimum_width,
+        integer_tolerance: options.integer_tolerance,
+        feasibility_tolerance: options.feasibility_tolerance,
+        absolute_gap_tolerance: options.absolute_gap_tolerance,
+        relative_gap_tolerance: options.relative_gap_tolerance,
+        simplex_iterations: count(options.simplex_iterations, "simplex_iterations")?,
+        propagation_passes: count(options.propagation_passes, "propagation_passes")?,
+        propagation_tolerance: options.propagation_tolerance,
+        enable_rounding_heuristic: options.enable_rounding_heuristic,
+        ..GlobalMinlpOptions::default()
+    })?;
+    Ok(global_minlp_result(value))
+}
+
+fn global_minlp_result(value: GlobalMinlpResult) -> FfiGlobalMinlpResult {
+    FfiGlobalMinlpResult {
+        point:value.point, objective:value.objective, global_lower_bound:value.global_lower_bound,
+        absolute_gap:value.absolute_gap, relative_gap:value.relative_gap,
+        nodes_explored:value.nodes_explored as u64, relaxations_solved:value.relaxations_solved as u64,
+        nodes_pruned_by_bound:value.nodes_pruned_by_bound as u64,
+        nodes_pruned_infeasible:value.nodes_pruned_infeasible as u64,
+        nodes_pruned_by_propagation:value.nodes_pruned_by_propagation as u64,
+        propagation_passes:value.propagation_passes as u64, bounds_tightened:value.bounds_tightened as u64,
+        integer_branches:value.integer_branches as u64, spatial_branches:value.spatial_branches as u64,
+        local_solves:value.local_solves as u64, heuristic_attempts:value.heuristic_attempts as u64,
+        heuristic_successes:value.heuristic_successes as u64, incumbents_found:value.incumbents_found as u64,
+        maximum_depth:value.maximum_depth as u64, global_optimality_certified:value.global_optimality_certified,
+        termination: match value.termination {
+            GlobalMinlpTermination::GlobalGap=>FfiGlobalMinlpTermination::GlobalGap,
+            GlobalMinlpTermination::SearchExhausted=>FfiGlobalMinlpTermination::SearchExhausted,
+            GlobalMinlpTermination::SpatialResolution=>FfiGlobalMinlpTermination::SpatialResolution,
+            GlobalMinlpTermination::NodeLimit=>FfiGlobalMinlpTermination::NodeLimit,
+            GlobalMinlpTermination::Infeasible=>FfiGlobalMinlpTermination::Infeasible,
+            GlobalMinlpTermination::RelaxationFailure=>FfiGlobalMinlpTermination::RelaxationFailure,
+            GlobalMinlpTermination::Cancelled=>FfiGlobalMinlpTermination::Cancelled,
+        },
+    }
+}
+
+#[uniffi::export]
 pub fn solve_spatial_branch_and_bound(
     model_value: FfiNonlinearModel,
     constraints: Vec<FfiNonlinearConstraint>,
@@ -1399,6 +1487,30 @@ mod tests {
         )
         .unwrap();
         assert!((result.point[0] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn global_minlp_certificate_crosses_transport() {
+        let expression = FfiNonlinearExpression {
+            nodes: vec![
+                node(FfiNonlinearNodeKind::Parameter, 0, 0, 0.0),
+                node(FfiNonlinearNodeKind::Pow, 0, 0, 2.0),
+                node(FfiNonlinearNodeKind::Negate, 1, 0, 0.0),
+            ], output: 2,
+        };
+        let result = solve_global_minlp(
+            FfiNonlinearModel { parameter_count: 1,
+                bounds: vec![crate::FfiBound { lower: Some(-2.0), upper: Some(1.0) }],
+                objective: Some(expression), residuals: vec![] },
+            vec![], vec![true], FfiGlobalMinlpOptions {
+                max_nodes: 100, minimum_width: 1e-4, integer_tolerance: 1e-7,
+                feasibility_tolerance: 1e-7, absolute_gap_tolerance: 1e-6,
+                relative_gap_tolerance: 1e-6, simplex_iterations: 10_000,
+                propagation_passes: 8, propagation_tolerance: 1e-10,
+                enable_rounding_heuristic: true,
+            }).unwrap();
+        assert!((result.objective + 4.0).abs() < 1e-8);
+        assert!(result.global_optimality_certified);
     }
 
     #[test]

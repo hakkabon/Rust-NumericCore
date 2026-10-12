@@ -102,6 +102,9 @@ combining LP lower bounds with local NLP incumbents and certified global gaps
 for bounded factorable nonlinear programs. Phase 29 adds forward/backward
 nonlinear propagation, node infeasibility proofs, and incumbent-cutoff bound
 tightening before each relaxation.
+Phase 30 combines the same propagation and graph relaxations with joint
+integer/spatial branching and integer-fixed nonlinear polishing for certified
+global MINLP search.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

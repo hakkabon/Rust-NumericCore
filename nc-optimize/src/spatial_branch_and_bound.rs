@@ -337,7 +337,7 @@ where
     })
 }
 
-fn compile_relaxation(
+pub(crate) fn compile_relaxation(
     problem: &SpatialBranchAndBoundProblem,
     bounds: &[Bound],
 ) -> Result<Problem, OptimizeError> {
