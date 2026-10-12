@@ -1,7 +1,7 @@
 //! Mixed-integer nonlinear search using the shared graph and local NLP relaxations.
 
 use crate::{
-    minimize_constrained, minimize_model_lbfgsb, minimize_sqp, Bound, ConstrainedNonlinearProblem,
+    certify_convex_model, minimize_constrained, minimize_model_lbfgsb, minimize_sqp, Bound, ConstrainedNonlinearProblem,
     ConstrainedOptions, ConstrainedTermination, ConstraintMultiplier, LbfgsOptions,
     NonlinearConstraint, NonlinearModel, NonlinearTermination, OptimizeError, SqpOptions,
     SqpTermination,
@@ -113,7 +113,8 @@ pub struct MixedIntegerNonlinearResult {
     pub best_relaxation_objective: Option<f64>,
     pub absolute_gap: Option<f64>,
     pub relative_gap: Option<f64>,
-    /// Always false until the expression graph carries a convexity certificate.
+    /// True only after exhaustive search with successful convex relaxations and
+    /// a conservative graph-convexity certificate.
     pub global_optimality_certified: bool,
     pub termination: MixedIntegerNonlinearTermination,
 }
@@ -162,6 +163,7 @@ where
 {
     problem.validate()?;
     validate_options(&options)?;
+    let convexity_certificate = certify_convex_model(&problem.model, &problem.constraints)?;
     if initial.len() != problem.model.parameter_count || !initial.iter().all(|x| x.is_finite()) {
         return Err(invalid(
             "initial point must contain one finite value per parameter",
@@ -227,6 +229,7 @@ where
                 heuristic_successes,
                 warm_incumbent_accepted,
                 best_relaxation,
+                false,
                 MixedIntegerNonlinearTermination::Cancelled,
             ));
         }
@@ -318,6 +321,10 @@ where
     } else {
         MixedIntegerNonlinearTermination::NodeLimit
     };
+    let globally_certified = termination == MixedIntegerNonlinearTermination::SearchExhausted
+        && relaxation_failures == 0
+        && incumbent.is_some()
+        && convexity_certificate.globally_convex;
     Ok(finish(
         incumbent,
         nodes_explored,
@@ -329,6 +336,7 @@ where
         heuristic_successes,
         warm_incumbent_accepted,
         best_relaxation,
+        globally_certified,
         termination,
     ))
 }
@@ -534,6 +542,7 @@ fn finish(
     heuristic_successes: usize,
     warm_incumbent_accepted: bool,
     best_relaxation: Option<f64>,
+    globally_certified: bool,
     termination: MixedIntegerNonlinearTermination,
 ) -> MixedIntegerNonlinearResult {
     let gap = incumbent
@@ -568,7 +577,7 @@ fn finish(
         best_relaxation_objective: best_relaxation,
         absolute_gap: gap,
         relative_gap: relative,
-        global_optimality_certified: false,
+        global_optimality_certified: globally_certified,
         termination,
     }
 }
@@ -675,7 +684,7 @@ mod tests {
         assert_eq!(result.point, vec![2.0]);
         assert!((result.objective - 0.16).abs() < 1e-8, "{:?}", result);
         assert!(result.nodes_explored >= 3);
-        assert!(!result.global_optimality_certified);
+        assert!(result.global_optimality_certified);
     }
 
     #[test]

@@ -57,6 +57,13 @@ pub use nonlinear_model::{
     DifferentiableValue, NonlinearExpression, NonlinearModel, NonlinearNode,
 };
 
+pub mod convexity;
+pub use convexity::{
+    analyze_expression, certify_convex_model, relax_expression, AffineRelaxationRow,
+    ExpressionAnalysis, ExpressionConvexity, GlobalExpressionRelaxation, Interval,
+    NodeAnalysis, NonlinearConvexityCertificate,
+};
+
 pub mod sparse_derivatives;
 pub use sparse_derivatives::{SparseDerivative, SparseJacobian};
 
