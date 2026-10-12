@@ -99,7 +99,9 @@ LP/QP/MILP/nonlinear reference program run in pull-request CI.
 Phase 27 adds conservative interval/convexity analysis and affine graph
 relaxations. Phase 28 solves those relaxations inside spatial branch-and-bound,
 combining LP lower bounds with local NLP incumbents and certified global gaps
-for bounded factorable nonlinear programs.
+for bounded factorable nonlinear programs. Phase 29 adds forward/backward
+nonlinear propagation, node infeasibility proofs, and incumbent-cutoff bound
+tightening before each relaxation.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

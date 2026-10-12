@@ -20,7 +20,8 @@ use nc_optimize::{
     SqpOptions, SqpResult, SqpTermination, FeasibilityRestorationOptions,
     FeasibilityRestorationTermination,
     restore_feasibility, solve_sparse_kkt, SparseHessian, SparseJacobian, SparseKktProblem,
-    minimize_spatial, SpatialBranchAndBoundOptions, SpatialBranchAndBoundProblem,
+    minimize_spatial, propagate_nonlinear_bounds, NonlinearPropagationOptions,
+    SpatialBranchAndBoundOptions, SpatialBranchAndBoundProblem,
     SpatialBranchAndBoundResult, SpatialTermination,
 };
 
@@ -94,6 +95,20 @@ pub struct FfiNonlinearModel {
 pub struct FfiNonlinearConstraint {
     pub expression: FfiNonlinearExpression,
     pub bound: crate::FfiBound,
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Record)]
+pub struct FfiNonlinearPropagationOptions {
+    pub max_passes: u64,
+    pub tolerance: f64,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiNonlinearPropagationResult {
+    pub bounds: Vec<crate::FfiBound>,
+    pub passes: u64,
+    pub bounds_tightened: u64,
+    pub infeasible: bool,
 }
 
 #[derive(Debug, Clone, Copy, uniffi::Record)]
@@ -342,6 +357,8 @@ pub struct FfiSpatialBranchAndBoundOptions {
     pub relative_gap_tolerance: f64,
     pub feasibility_tolerance: f64,
     pub simplex_iterations: u64,
+    pub propagation_passes: u64,
+    pub propagation_tolerance: f64,
 }
 
 #[derive(Debug, Clone, Copy, uniffi::Enum)]
@@ -366,6 +383,9 @@ pub struct FfiSpatialBranchAndBoundResult {
     pub relaxations_solved: u64,
     pub nodes_pruned_by_bound: u64,
     pub nodes_pruned_infeasible: u64,
+    pub nodes_pruned_by_propagation: u64,
+    pub propagation_passes: u64,
+    pub bounds_tightened: u64,
     pub local_solves: u64,
     pub incumbents_found: u64,
     pub maximum_depth: u64,
@@ -920,6 +940,34 @@ pub fn solve_mixed_integer_nonlinear(
 }
 
 #[uniffi::export]
+pub fn tighten_nonlinear_bounds(
+    model_value: FfiNonlinearModel,
+    constraints: Vec<FfiNonlinearConstraint>,
+    objective_cutoff: Option<f64>,
+    options: FfiNonlinearPropagationOptions,
+) -> Result<FfiNonlinearPropagationResult, FfiError> {
+    let model = model(model_value);
+    let constraints: Vec<_> = constraints.into_iter().map(|value| NonlinearConstraint {
+        expression: expression(value.expression), bound: bound(value.bound),
+    }).collect();
+    let value = propagate_nonlinear_bounds(
+        &model, &constraints, &model.bounds, objective_cutoff,
+        NonlinearPropagationOptions {
+            max_passes: count(options.max_passes, "max_passes")?,
+            tolerance: options.tolerance,
+        },
+    )?;
+    Ok(FfiNonlinearPropagationResult {
+        bounds: value.bounds.into_iter().map(|value| crate::FfiBound {
+            lower: value.lower, upper: value.upper,
+        }).collect(),
+        passes: value.passes as u64,
+        bounds_tightened: value.bounds_tightened as u64,
+        infeasible: value.infeasible,
+    })
+}
+
+#[uniffi::export]
 pub fn solve_spatial_branch_and_bound(
     model_value: FfiNonlinearModel,
     constraints: Vec<FfiNonlinearConstraint>,
@@ -938,6 +986,8 @@ pub fn solve_spatial_branch_and_bound(
         relative_gap_tolerance: options.relative_gap_tolerance,
         feasibility_tolerance: options.feasibility_tolerance,
         simplex_iterations: count(options.simplex_iterations, "simplex_iterations")?,
+        propagation_passes: count(options.propagation_passes, "propagation_passes")?,
+        propagation_tolerance: options.propagation_tolerance,
         ..SpatialBranchAndBoundOptions::default()
     })?;
     Ok(spatial_result(value))
@@ -952,6 +1002,9 @@ fn spatial_result(value: SpatialBranchAndBoundResult) -> FfiSpatialBranchAndBoun
         relaxations_solved: value.relaxations_solved as u64,
         nodes_pruned_by_bound: value.nodes_pruned_by_bound as u64,
         nodes_pruned_infeasible: value.nodes_pruned_infeasible as u64,
+        nodes_pruned_by_propagation: value.nodes_pruned_by_propagation as u64,
+        propagation_passes: value.propagation_passes as u64,
+        bounds_tightened: value.bounds_tightened as u64,
         local_solves: value.local_solves as u64,
         incumbents_found: value.incumbents_found as u64,
         maximum_depth: value.maximum_depth as u64,
@@ -1349,6 +1402,33 @@ mod tests {
     }
 
     #[test]
+    fn nonlinear_propagation_crosses_transport() {
+        let square = FfiNonlinearExpression {
+            nodes: vec![
+                node(FfiNonlinearNodeKind::Parameter, 0, 0, 0.0),
+                node(FfiNonlinearNodeKind::Pow, 0, 0, 2.0),
+            ],
+            output: 1,
+        };
+        let result = tighten_nonlinear_bounds(
+            FfiNonlinearModel {
+                parameter_count: 1,
+                bounds: vec![crate::FfiBound { lower: Some(-10.0), upper: Some(10.0) }],
+                objective: Some(square.clone()), residuals: vec![],
+            },
+            vec![FfiNonlinearConstraint {
+                expression: square,
+                bound: crate::FfiBound { lower: None, upper: Some(4.0) },
+            }],
+            None,
+            FfiNonlinearPropagationOptions { max_passes: 8, tolerance: 1e-10 },
+        ).unwrap();
+        assert_eq!(result.bounds[0].lower, Some(-2.0));
+        assert_eq!(result.bounds[0].upper, Some(2.0));
+        assert_eq!(result.bounds_tightened, 2);
+    }
+
+    #[test]
     fn spatial_global_certificate_crosses_transport() {
         let expression = FfiNonlinearExpression {
             nodes: vec![
@@ -1367,6 +1447,7 @@ mod tests {
                 max_nodes: 100, minimum_width: 1e-4,
                 absolute_gap_tolerance: 1e-6, relative_gap_tolerance: 1e-6,
                 feasibility_tolerance: 1e-7, simplex_iterations: 10_000,
+                propagation_passes: 8, propagation_tolerance: 1e-10,
             },
         ).unwrap();
         assert!((result.objective + 4.0).abs() < 1e-6);

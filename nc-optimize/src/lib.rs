@@ -64,6 +64,10 @@ pub use convexity::{
     NodeAnalysis, NonlinearConvexityCertificate,
 };
 
+pub mod nonlinear_propagation;
+pub use nonlinear_propagation::{propagate_nonlinear_bounds, NonlinearPropagationOptions,
+    NonlinearPropagationResult};
+
 pub mod spatial_branch_and_bound;
 pub use spatial_branch_and_bound::{
     minimize_spatial, minimize_spatial_with_observer, SpatialBranchAndBoundOptions,

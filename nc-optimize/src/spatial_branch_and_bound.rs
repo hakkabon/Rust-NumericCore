@@ -1,9 +1,10 @@
 //! Certified spatial branch-and-bound for bounded factorable NLPs.
 
 use crate::{
-    minimize_model_lbfgsb, minimize_sqp, relax_expression, Bound, ConstrainedNonlinearProblem,
-    LbfgsOptions, NonlinearConstraint, NonlinearModel, NonlinearTermination, OptimizeError,
-    Problem, RevisedSimplexSolver, SolveStatus, Solver, SqpOptions, SqpTermination,
+    minimize_model_lbfgsb, minimize_sqp, propagate_nonlinear_bounds, relax_expression, Bound,
+    ConstrainedNonlinearProblem, LbfgsOptions, NonlinearConstraint, NonlinearModel,
+    NonlinearPropagationOptions, NonlinearTermination, OptimizeError, Problem,
+    RevisedSimplexSolver, SolveStatus, Solver, SqpOptions, SqpTermination,
 };
 use nc_sparse::CsrMatrix;
 
@@ -26,6 +27,8 @@ pub struct SpatialBranchAndBoundOptions {
     pub relative_gap_tolerance: f64,
     pub feasibility_tolerance: f64,
     pub simplex_iterations: usize,
+    pub propagation_passes: usize,
+    pub propagation_tolerance: f64,
     pub local_options: LbfgsOptions,
     pub sqp_options: SqpOptions,
 }
@@ -39,6 +42,8 @@ impl Default for SpatialBranchAndBoundOptions {
             relative_gap_tolerance: 1e-6,
             feasibility_tolerance: 1e-7,
             simplex_iterations: 10_000,
+            propagation_passes: 8,
+            propagation_tolerance: 1e-10,
             local_options: LbfgsOptions::default(),
             sqp_options: SqpOptions::default(),
         }
@@ -88,6 +93,9 @@ pub struct SpatialBranchAndBoundResult {
     pub relaxations_solved: usize,
     pub nodes_pruned_by_bound: usize,
     pub nodes_pruned_infeasible: usize,
+    pub nodes_pruned_by_propagation: usize,
+    pub propagation_passes: usize,
+    pub bounds_tightened: usize,
     pub local_solves: usize,
     pub incumbents_found: usize,
     pub maximum_depth: usize,
@@ -145,6 +153,9 @@ where
     let mut solved = 0;
     let mut pruned_bound = 0;
     let mut pruned_infeasible = 0;
+    let mut pruned_propagation = 0;
+    let mut propagation_passes = 0;
+    let mut bounds_tightened = 0;
     let mut local_solves = 0;
     let mut incumbents = 0;
     let mut maximum_depth = 0;
@@ -159,9 +170,29 @@ where
             .min_by(|a, b| a.1.inherited_bound.total_cmp(&b.1.inherited_bound))
             .map(|item| item.0)
             .unwrap();
-        let node = nodes.swap_remove(node_index);
+        let mut node = nodes.swap_remove(node_index);
         explored += 1;
         maximum_depth = maximum_depth.max(node.depth);
+        let propagation = propagate_nonlinear_bounds(
+            &problem.model,
+            &problem.constraints,
+            &node.bounds,
+            incumbent
+                .as_ref()
+                .map(|value| value.objective - options.absolute_gap_tolerance),
+            NonlinearPropagationOptions {
+                max_passes: options.propagation_passes,
+                tolerance: options.propagation_tolerance,
+            },
+        )?;
+        propagation_passes += propagation.passes;
+        bounds_tightened += propagation.bounds_tightened;
+        if propagation.infeasible {
+            pruned_infeasible += 1;
+            pruned_propagation += 1;
+            continue;
+        }
+        node.bounds = propagation.bounds;
         let relaxation_problem = compile_relaxation(problem, &node.bounds)?;
         let solution = RevisedSimplexSolver {
             max_iterations: options.simplex_iterations,
@@ -295,6 +326,9 @@ where
         relaxations_solved: solved,
         nodes_pruned_by_bound: pruned_bound,
         nodes_pruned_infeasible: pruned_infeasible,
+        nodes_pruned_by_propagation: pruned_propagation,
+        propagation_passes,
+        bounds_tightened,
         local_solves,
         incumbents_found: incumbents,
         maximum_depth,
@@ -476,6 +510,9 @@ fn global_bound(nodes: &[Node], unresolved: f64) -> f64 {
 fn validate_options(options: &SpatialBranchAndBoundOptions) -> Result<(), OptimizeError> {
     if options.max_nodes == 0
         || options.simplex_iterations == 0
+        || options.propagation_passes == 0
+        || !options.propagation_tolerance.is_finite()
+        || options.propagation_tolerance < 0.0
         || !options.minimum_width.is_finite()
         || options.minimum_width <= 0.0
         || !options.absolute_gap_tolerance.is_finite()
@@ -500,6 +537,24 @@ fn invalid(message: &str) -> OptimizeError {
 mod tests {
     use super::*;
     use crate::{NonlinearExpression, NonlinearNode};
+
+    #[test]
+    fn propagation_prunes_before_relaxation() {
+        let square = NonlinearExpression::new(
+            vec![NonlinearNode::Parameter(0), NonlinearNode::Powf(0, 2.0)], 1);
+        let model = NonlinearModel::objective(1,
+            vec![Bound { lower: Some(-10.0), upper: Some(10.0) }], square.clone());
+        let problem = SpatialBranchAndBoundProblem {
+            model,
+            constraints: vec![NonlinearConstraint {
+                expression: square, bound: Bound { lower: None, upper: Some(-1.0) },
+            }],
+        };
+        let result = minimize_spatial(&problem, SpatialBranchAndBoundOptions::default()).unwrap();
+        assert_eq!(result.termination, SpatialTermination::Infeasible);
+        assert_eq!(result.relaxations_solved, 0);
+        assert_eq!(result.nodes_pruned_by_propagation, 1);
+    }
 
     #[test]
     fn globally_solves_concave_quadratic_on_a_box() {
