@@ -20,6 +20,8 @@ use nc_optimize::{
     SqpOptions, SqpResult, SqpTermination, FeasibilityRestorationOptions,
     FeasibilityRestorationTermination,
     restore_feasibility, solve_sparse_kkt, SparseHessian, SparseJacobian, SparseKktProblem,
+    minimize_spatial, SpatialBranchAndBoundOptions, SpatialBranchAndBoundProblem,
+    SpatialBranchAndBoundResult, SpatialTermination,
 };
 
 #[derive(Debug, Clone, Copy, uniffi::Record)]
@@ -330,6 +332,45 @@ pub struct FfiMixedIntegerNonlinearResult {
     pub relative_gap: Option<f64>,
     pub global_optimality_certified: bool,
     pub termination: FfiMixedIntegerNonlinearTermination,
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Record)]
+pub struct FfiSpatialBranchAndBoundOptions {
+    pub max_nodes: u64,
+    pub minimum_width: f64,
+    pub absolute_gap_tolerance: f64,
+    pub relative_gap_tolerance: f64,
+    pub feasibility_tolerance: f64,
+    pub simplex_iterations: u64,
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum FfiSpatialTermination {
+    GlobalGap,
+    SearchExhausted,
+    SpatialResolution,
+    NodeLimit,
+    Infeasible,
+    RelaxationFailure,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiSpatialBranchAndBoundResult {
+    pub point: Vec<f64>,
+    pub objective: f64,
+    pub global_lower_bound: Option<f64>,
+    pub absolute_gap: Option<f64>,
+    pub relative_gap: Option<f64>,
+    pub nodes_explored: u64,
+    pub relaxations_solved: u64,
+    pub nodes_pruned_by_bound: u64,
+    pub nodes_pruned_infeasible: u64,
+    pub local_solves: u64,
+    pub incumbents_found: u64,
+    pub maximum_depth: u64,
+    pub global_optimality_certified: bool,
+    pub termination: FfiSpatialTermination,
 }
 
 #[derive(Debug, Clone, Copy, uniffi::Record)]
@@ -878,6 +919,55 @@ pub fn solve_mixed_integer_nonlinear(
     Ok(mixed_integer_nonlinear_result(value))
 }
 
+#[uniffi::export]
+pub fn solve_spatial_branch_and_bound(
+    model_value: FfiNonlinearModel,
+    constraints: Vec<FfiNonlinearConstraint>,
+    options: FfiSpatialBranchAndBoundOptions,
+) -> Result<FfiSpatialBranchAndBoundResult, FfiError> {
+    let problem = SpatialBranchAndBoundProblem {
+        model: model(model_value),
+        constraints: constraints.into_iter().map(|value| NonlinearConstraint {
+            expression: expression(value.expression), bound: bound(value.bound),
+        }).collect(),
+    };
+    let value = minimize_spatial(&problem, SpatialBranchAndBoundOptions {
+        max_nodes: count(options.max_nodes, "max_nodes")?,
+        minimum_width: options.minimum_width,
+        absolute_gap_tolerance: options.absolute_gap_tolerance,
+        relative_gap_tolerance: options.relative_gap_tolerance,
+        feasibility_tolerance: options.feasibility_tolerance,
+        simplex_iterations: count(options.simplex_iterations, "simplex_iterations")?,
+        ..SpatialBranchAndBoundOptions::default()
+    })?;
+    Ok(spatial_result(value))
+}
+
+fn spatial_result(value: SpatialBranchAndBoundResult) -> FfiSpatialBranchAndBoundResult {
+    FfiSpatialBranchAndBoundResult {
+        point: value.point, objective: value.objective,
+        global_lower_bound: value.global_lower_bound,
+        absolute_gap: value.absolute_gap, relative_gap: value.relative_gap,
+        nodes_explored: value.nodes_explored as u64,
+        relaxations_solved: value.relaxations_solved as u64,
+        nodes_pruned_by_bound: value.nodes_pruned_by_bound as u64,
+        nodes_pruned_infeasible: value.nodes_pruned_infeasible as u64,
+        local_solves: value.local_solves as u64,
+        incumbents_found: value.incumbents_found as u64,
+        maximum_depth: value.maximum_depth as u64,
+        global_optimality_certified: value.global_optimality_certified,
+        termination: match value.termination {
+            SpatialTermination::GlobalGap => FfiSpatialTermination::GlobalGap,
+            SpatialTermination::SearchExhausted => FfiSpatialTermination::SearchExhausted,
+            SpatialTermination::SpatialResolution => FfiSpatialTermination::SpatialResolution,
+            SpatialTermination::NodeLimit => FfiSpatialTermination::NodeLimit,
+            SpatialTermination::Infeasible => FfiSpatialTermination::Infeasible,
+            SpatialTermination::RelaxationFailure => FfiSpatialTermination::RelaxationFailure,
+            SpatialTermination::Cancelled => FfiSpatialTermination::Cancelled,
+        },
+    }
+}
+
 fn mixed_integer_nonlinear_result(
     value: MixedIntegerNonlinearResult,
 ) -> FfiMixedIntegerNonlinearResult {
@@ -1256,6 +1346,32 @@ mod tests {
         )
         .unwrap();
         assert!((result.point[0] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn spatial_global_certificate_crosses_transport() {
+        let expression = FfiNonlinearExpression {
+            nodes: vec![
+                node(FfiNonlinearNodeKind::Parameter, 0, 0, 0.0),
+                node(FfiNonlinearNodeKind::Pow, 0, 0, 2.0),
+                node(FfiNonlinearNodeKind::Negate, 1, 0, 0.0),
+            ], output: 2,
+        };
+        let result = solve_spatial_branch_and_bound(
+            FfiNonlinearModel {
+                parameter_count: 1,
+                bounds: vec![crate::FfiBound { lower: Some(-2.0), upper: Some(1.0) }],
+                objective: Some(expression), residuals: vec![],
+            }, vec![],
+            FfiSpatialBranchAndBoundOptions {
+                max_nodes: 100, minimum_width: 1e-4,
+                absolute_gap_tolerance: 1e-6, relative_gap_tolerance: 1e-6,
+                feasibility_tolerance: 1e-7, simplex_iterations: 10_000,
+            },
+        ).unwrap();
+        assert!((result.objective + 4.0).abs() < 1e-6);
+        assert!(result.global_optimality_certified);
+        assert!(matches!(result.termination, FfiSpatialTermination::GlobalGap));
     }
 
     #[test]

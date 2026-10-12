@@ -64,6 +64,13 @@ pub use convexity::{
     NodeAnalysis, NonlinearConvexityCertificate,
 };
 
+pub mod spatial_branch_and_bound;
+pub use spatial_branch_and_bound::{
+    minimize_spatial, minimize_spatial_with_observer, SpatialBranchAndBoundOptions,
+    SpatialBranchAndBoundProblem, SpatialBranchAndBoundResult, SpatialIteration,
+    SpatialTermination,
+};
+
 pub mod sparse_derivatives;
 pub use sparse_derivatives::{SparseDerivative, SparseJacobian};
 

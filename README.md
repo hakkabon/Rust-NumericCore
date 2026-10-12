@@ -96,6 +96,10 @@ incumbents with search metrics.
 Phase 26 adds structured numerical evidence: scale-aware metrics, independent
 backward-error checks, deterministic perturbations, and an audited
 LP/QP/MILP/nonlinear reference program run in pull-request CI.
+Phase 27 adds conservative interval/convexity analysis and affine graph
+relaxations. Phase 28 solves those relaxations inside spatial branch-and-bound,
+combining LP lower bounds with local NLP incumbents and certified global gaps
+for bounded factorable nonlinear programs.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's
