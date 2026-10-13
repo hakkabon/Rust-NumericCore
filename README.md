@@ -110,6 +110,9 @@ sparse Hessians, plus a validated sparse-QP adapter to the production solver.
 Phase 32 adds reversible sparse LP/MILP presolve: activity-based infeasibility,
 redundant-row removal, singleton bound propagation, fixed-variable elimination,
 and primal/objective postsolve reconstruction.
+Phase 33 expands deterministic validation with postsolve, mixed-scale sparse,
+and perturbation cases, plus opt-in Criterion benchmarks for sparse model
+operations (`cargo bench -p nc-bench --bench optimization_pipeline`).
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

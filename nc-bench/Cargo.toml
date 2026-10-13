@@ -10,10 +10,16 @@ publish = false
 
 [dependencies]
 nc-kernels-generic.workspace = true
+nc-optimize.workspace = true
+nc-sparse.workspace = true
 
 [dev-dependencies]
 criterion = "0.5"
 
 [[bench]]
 name = "matmul_generic"
+harness = false
+
+[[bench]]
+name = "optimization_pipeline"
 harness = false
