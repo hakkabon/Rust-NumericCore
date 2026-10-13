@@ -133,6 +133,10 @@ pub mod sparse_optimization;
 pub use sparse_optimization::{solve_sparse_convex_qp, SparseLinearWorkspace,
     SparseQuadraticProblem, SparseSymmetricMatrix};
 
+pub mod model_presolve;
+pub use model_presolve::{presolve_problem, PresolveOptions, PresolveReport, PresolveStatus,
+    PresolvedProblem};
+
 pub mod scaling;
 pub use scaling::{ScaledProblem, ScaledSolver, ScalingOptions, ScalingReport};
 
