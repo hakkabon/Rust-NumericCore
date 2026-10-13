@@ -129,6 +129,10 @@ pub use quadratic_program::{
     QuadraticTermination, QuadraticWarmStart,
 };
 
+pub mod sparse_optimization;
+pub use sparse_optimization::{solve_sparse_convex_qp, SparseLinearWorkspace,
+    SparseQuadraticProblem, SparseSymmetricMatrix};
+
 pub mod scaling;
 pub use scaling::{ScaledProblem, ScaledSolver, ScalingOptions, ScalingReport};
 

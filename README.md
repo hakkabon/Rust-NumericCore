@@ -105,6 +105,8 @@ tightening before each relaxation.
 Phase 30 combines the same propagation and graph relaxations with joint
 integer/spatial branching and integer-fixed nonlinear polishing for certified
 global MINLP search.
+Phase 31 adds reusable CSR/transpose LP workspaces and canonical symmetric
+sparse Hessians, plus a validated sparse-QP adapter to the production solver.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's
