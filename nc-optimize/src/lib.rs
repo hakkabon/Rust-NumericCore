@@ -137,6 +137,10 @@ pub mod model_presolve;
 pub use model_presolve::{presolve_problem, PresolveOptions, PresolveReport, PresolveStatus,
     PresolvedProblem};
 
+pub mod advanced_nonlinear;
+pub use advanced_nonlinear::{minimize_newton_cg, minimize_powell, NewtonCgOptions,
+    NewtonCgResult, PowellOptions, PowellResult};
+
 pub mod scaling;
 pub use scaling::{ScaledProblem, ScaledSolver, ScalingOptions, ScalingReport};
 
