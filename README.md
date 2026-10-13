@@ -118,6 +118,9 @@ iterative general-row bound propagation, and fixed-integer LP repair of rounded
 incumbent candidates.
 Phase 35 adds matrix-free Steihaug trust-region Newton-CG and Powell's
 derivative-free direction-set method as complementary advanced nonlinear paths.
+Phase 36 adds bound-aware Nelder-Mead and deterministic coordinate pattern
+search, including evaluation budgets, cancellation, and convergence-geometry
+diagnostics for value-only and nonsmooth objectives.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's
