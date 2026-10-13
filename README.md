@@ -113,6 +113,9 @@ and primal/objective postsolve reconstruction.
 Phase 33 expands deterministic validation with postsolve, mixed-scale sparse,
 and perturbation cases, plus opt-in Criterion benchmarks for sparse model
 operations (`cargo bench -p nc-bench --bench optimization_pipeline`).
+Phase 34 strengthens production MILP search with binary knapsack cover cuts,
+iterative general-row bound propagation, and fixed-integer LP repair of rounded
+incumbent candidates.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

@@ -28,9 +28,14 @@
 //!   solved children is accumulated per variable and direction. Variables
 //!   without reliable observations use deterministic most-fractional fallback;
 //!   most-fractional remains directly selectable for comparison.
-//! - **Singleton-row bound propagation** tightens variable domains before each
-//!   relaxation and rounds implied integer bounds inward. Contradictions prune
-//!   a node without spending an LP solve.
+//! - **Iterative row bound propagation** tightens variable domains from every
+//!   linear row before each relaxation and rounds implied integer bounds
+//!   inward. Contradictions prune a node without spending an LP solve.
+//! - **Rounding-and-repair heuristic.** Integer variables are rounded, fixed,
+//!   and the remaining continuous LP is re-solved instead of discarding a
+//!   promising point merely because direct rounding violates a row.
+//! - **Binary knapsack cover cuts.** A deterministic minimal cover is extracted
+//!   from eligible nonnegative binary rows and added globally before search.
 //! - **Selectable depth-first or best-bound search.** Best-bound is the
 //!   default because it focuses work on closing the global certificate;
 //!   depth-first remains available for memory-sensitive workloads.
@@ -57,7 +62,8 @@
 //!   have either limitation, which is why it's the default rather than
 //!   an arbitrary choice.
 
-use crate::{Bound, OptimizeError, Problem, RevisedSimplexSolver, SolveStatus, Solution, Solver};
+use crate::{Bound, OptimizeError, Problem, RevisedSimplexSolver, Solution, SolveStatus, Solver};
+use nc_sparse::CsrMatrix;
 
 /// Policy used to choose the next open node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,7 +172,10 @@ struct BranchOrigin {
 }
 
 #[derive(Clone, Copy)]
-enum BranchDirection { Down, Up }
+enum BranchDirection {
+    Down,
+    Up,
+}
 
 impl NodeBounds {
     fn tightened(&self, var_index: usize, lower: Option<f64>, upper: Option<f64>) -> Self {
@@ -177,7 +186,9 @@ impl NodeBounds {
             upper: tighter_upper(current.upper, upper),
         };
         Self {
-            var_bounds, lower_bound: self.lower_bound, depth: self.depth + 1,
+            var_bounds,
+            lower_bound: self.lower_bound,
+            depth: self.depth + 1,
             branch_origin: None,
         }
     }
@@ -242,24 +253,41 @@ impl BranchAndBoundSolver {
             // it directly rather than paying for a branch-and-bound
             // tree with nothing to branch on.
             let solution = self.relaxation_solver.solve(problem)?;
-            let bound = (solution.status == SolveStatus::Optimal).then_some(solution.objective_value);
-            return Ok(report(solution, 1, bound, SearchStatistics {
-                relaxations_solved: 1, ..Default::default()
-            },
-                BranchAndBoundTermination::ContinuousRelaxation));
+            let bound =
+                (solution.status == SolveStatus::Optimal).then_some(solution.objective_value);
+            return Ok(report(
+                solution,
+                1,
+                bound,
+                SearchStatistics {
+                    relaxations_solved: 1,
+                    ..Default::default()
+                },
+                BranchAndBoundTermination::ContinuousRelaxation,
+            ));
         }
 
+        let strengthened_problem = add_binary_cover_cuts(problem, self.integer_tolerance)?;
+        let problem = &strengthened_problem;
+
         let mut frontier = vec![NodeBounds {
-            var_bounds: problem.var_bounds.clone(), lower_bound: None, depth: 0,
+            var_bounds: problem.var_bounds.clone(),
+            lower_bound: None,
+            depth: 0,
             branch_origin: None,
         }];
         let mut incumbent = match initial_incumbent {
-            Some(values) => Some(validated_incumbent(problem, values, self.integer_tolerance)?),
+            Some(values) => Some(validated_incumbent(
+                problem,
+                values,
+                self.integer_tolerance,
+            )?),
             None => None,
         };
         let mut nodes_explored = 0usize;
         let mut statistics = SearchStatistics {
-            incumbents_found: usize::from(incumbent.is_some()), ..Default::default()
+            incumbents_found: usize::from(incumbent.is_some()),
+            ..Default::default()
         };
         let mut pseudo_costs = PseudoCosts::new(problem.objective.len());
         let mut search_incomplete = false;
@@ -270,22 +298,30 @@ impl BranchAndBoundSolver {
             if nodes_explored == self.max_nodes {
                 let best_bound = open_best_bound(&frontier, node.lower_bound);
                 let solution = match incumbent {
-                    Some(sol) => Solution { status: SolveStatus::IterationLimit, ..sol },
+                    Some(sol) => Solution {
+                        status: SolveStatus::IterationLimit,
+                        ..sol
+                    },
                     None => Solution {
                         variable_values: vec![],
                         objective_value: 0.0,
                         status: SolveStatus::IterationLimit,
                     },
                 };
-                return Ok(report(solution, nodes_explored, best_bound, statistics,
-                    BranchAndBoundTermination::NodeLimit));
+                return Ok(report(
+                    solution,
+                    nodes_explored,
+                    best_bound,
+                    statistics,
+                    BranchAndBoundTermination::NodeLimit,
+                ));
             }
             nodes_explored += 1;
             statistics.maximum_depth = statistics.maximum_depth.max(node.depth);
 
             let mut node_bounds = node.var_bounds.clone();
             if self.bound_propagation {
-                match propagate_singleton_bounds(problem, &mut node_bounds, self.integer_tolerance) {
+                match propagate_row_bounds(problem, &mut node_bounds, self.integer_tolerance) {
                     Ok(tightened) => statistics.bounds_tightened += tightened,
                     Err(()) => {
                         statistics.nodes_pruned_infeasible += 1;
@@ -331,8 +367,13 @@ impl BranchAndBoundSolver {
                     // Deeper in the tree, added bounds normally rule
                     // this out; if it still happens, treat it the same
                     // way.
-                    return Ok(report(relaxed, nodes_explored, None, statistics,
-                        BranchAndBoundTermination::Unbounded));
+                    return Ok(report(
+                        relaxed,
+                        nodes_explored,
+                        None,
+                        statistics,
+                        BranchAndBoundTermination::Unbounded,
+                    ));
                 }
                 SolveStatus::IterationLimit => {
                     // The relaxation itself didn't converge - can't
@@ -361,12 +402,28 @@ impl BranchAndBoundSolver {
             }
 
             if self.rounding_heuristic
-                && branching_variable(&relaxed, &problem.is_integer, self.integer_tolerance,
-                    BranchingStrategy::MostFractional, &pseudo_costs).is_some()
+                && branching_variable(
+                    &relaxed,
+                    &problem.is_integer,
+                    self.integer_tolerance,
+                    BranchingStrategy::MostFractional,
+                    &pseudo_costs,
+                )
+                .is_some()
             {
                 statistics.heuristic_attempts += 1;
-                if let Some(candidate) = rounded_incumbent(problem, &relaxed, self.integer_tolerance) {
-                    if incumbent.as_ref().is_none_or(|best| candidate.objective_value < best.objective_value) {
+                let repaired = rounded_incumbent(
+                    &node_problem,
+                    &relaxed,
+                    self.integer_tolerance,
+                    self.relaxation_solver.as_ref(),
+                )?;
+                statistics.relaxations_solved += 1;
+                if let Some(candidate) = repaired {
+                    if incumbent
+                        .as_ref()
+                        .is_none_or(|best| candidate.objective_value < best.objective_value)
+                    {
                         incumbent = Some(candidate);
                         statistics.incumbents_found += 1;
                         statistics.heuristic_successes += 1;
@@ -375,8 +432,11 @@ impl BranchAndBoundSolver {
             }
 
             match branching_variable(
-                &relaxed, &problem.is_integer, self.integer_tolerance,
-                self.branching_strategy, &pseudo_costs,
+                &relaxed,
+                &problem.is_integer,
+                self.integer_tolerance,
+                self.branching_strategy,
+                &pseudo_costs,
             ) {
                 None => {
                     // Every integer-restricted variable already has an
@@ -394,12 +454,14 @@ impl BranchAndBoundSolver {
                     upper.lower_bound = Some(relaxed.objective_value);
                     lower.lower_bound = Some(relaxed.objective_value);
                     upper.branch_origin = Some(BranchOrigin {
-                        variable: var_index, direction: BranchDirection::Down,
+                        variable: var_index,
+                        direction: BranchDirection::Down,
                         parent_objective: relaxed.objective_value,
                         distance: value - floor_value,
                     });
                     lower.branch_origin = Some(BranchOrigin {
-                        variable: var_index, direction: BranchDirection::Up,
+                        variable: var_index,
+                        direction: BranchDirection::Up,
                         parent_objective: relaxed.objective_value,
                         distance: ceil_value - value,
                     });
@@ -410,34 +472,69 @@ impl BranchAndBoundSolver {
 
             if let Some(ref best) = incumbent {
                 let best_bound = open_best_bound(&frontier, incomplete_bound);
-                if gap_satisfied(best.objective_value, best_bound,
-                    self.absolute_gap_tolerance, self.relative_gap_tolerance)
-                {
-                    return Ok(report(best.clone(), nodes_explored, best_bound, statistics,
-                        BranchAndBoundTermination::GapSatisfied));
+                if gap_satisfied(
+                    best.objective_value,
+                    best_bound,
+                    self.absolute_gap_tolerance,
+                    self.relative_gap_tolerance,
+                ) {
+                    return Ok(report(
+                        best.clone(),
+                        nodes_explored,
+                        best_bound,
+                        statistics,
+                        BranchAndBoundTermination::GapSatisfied,
+                    ));
                 }
             }
         }
 
         match incumbent {
             Some(sol) if search_incomplete => {
-                let solution = Solution { status: SolveStatus::IterationLimit, ..sol };
-                Ok(report(solution, nodes_explored, incomplete_bound, statistics,
-                    BranchAndBoundTermination::RelaxationLimit))
+                let solution = Solution {
+                    status: SolveStatus::IterationLimit,
+                    ..sol
+                };
+                Ok(report(
+                    solution,
+                    nodes_explored,
+                    incomplete_bound,
+                    statistics,
+                    BranchAndBoundTermination::RelaxationLimit,
+                ))
             }
             Some(sol) => {
                 let bound = Some(sol.objective_value);
-                Ok(report(sol, nodes_explored, bound, statistics,
-                    BranchAndBoundTermination::Exhausted))
+                Ok(report(
+                    sol,
+                    nodes_explored,
+                    bound,
+                    statistics,
+                    BranchAndBoundTermination::Exhausted,
+                ))
             }
-            None if search_incomplete => Ok(report(Solution {
-                variable_values: vec![], objective_value: 0.0,
-                status: SolveStatus::IterationLimit,
-            }, nodes_explored, None, statistics, BranchAndBoundTermination::RelaxationLimit)),
-            None => Ok(report(Solution {
-                variable_values: vec![], objective_value: 0.0,
-                status: SolveStatus::Infeasible,
-            }, nodes_explored, None, statistics, BranchAndBoundTermination::Exhausted)),
+            None if search_incomplete => Ok(report(
+                Solution {
+                    variable_values: vec![],
+                    objective_value: 0.0,
+                    status: SolveStatus::IterationLimit,
+                },
+                nodes_explored,
+                None,
+                statistics,
+                BranchAndBoundTermination::RelaxationLimit,
+            )),
+            None => Ok(report(
+                Solution {
+                    variable_values: vec![],
+                    objective_value: 0.0,
+                    status: SolveStatus::Infeasible,
+                },
+                nodes_explored,
+                None,
+                statistics,
+                BranchAndBoundTermination::Exhausted,
+            )),
         }
     }
 }
@@ -452,9 +549,16 @@ fn validated_incumbent(
             "MILP warm start must contain one finite value per variable",
         ));
     }
-    let objective_value = problem.objective.iter().zip(values).map(|(c, x)| c * x).sum();
+    let objective_value = problem
+        .objective
+        .iter()
+        .zip(values)
+        .map(|(c, x)| c * x)
+        .sum();
     let solution = Solution {
-        variable_values: values.to_vec(), objective_value, status: SolveStatus::Optimal,
+        variable_values: values.to_vec(),
+        objective_value,
+        status: SolveStatus::Optimal,
     };
     if !solution.diagnostics(problem).is_verified(tolerance) {
         return Err(OptimizeError::InvalidConfiguration(
@@ -464,14 +568,39 @@ fn validated_incumbent(
     Ok(solution)
 }
 
-fn rounded_incumbent(problem: &Problem, relaxation: &Solution, tolerance: f64) -> Option<Solution> {
-    let mut values = relaxation.variable_values.clone();
+fn rounded_incumbent(
+    problem: &Problem,
+    relaxation: &Solution,
+    tolerance: f64,
+    solver: &dyn Solver,
+) -> Result<Option<Solution>, OptimizeError> {
+    let mut bounds = problem.var_bounds.clone();
     for (index, integer) in problem.is_integer.iter().enumerate() {
-        if *integer { values[index] = values[index].round(); }
+        if *integer {
+            let value = relaxation.variable_values[index].round();
+            if bounds[index]
+                .lower
+                .is_some_and(|lower| value < lower - tolerance)
+                || bounds[index]
+                    .upper
+                    .is_some_and(|upper| value > upper + tolerance)
+            {
+                return Ok(None);
+            }
+            bounds[index] = Bound::fixed(value);
+        }
     }
-    let objective_value = problem.objective.iter().zip(&values).map(|(c, x)| c * x).sum();
-    let candidate = Solution { variable_values: values, objective_value, status: SolveStatus::Optimal };
-    candidate.diagnostics(problem).is_verified(tolerance).then_some(candidate)
+    let repair = Problem {
+        objective: problem.objective.clone(),
+        constraints: problem.constraints.clone(),
+        row_bounds: problem.row_bounds.clone(),
+        var_bounds: bounds,
+        is_integer: problem.is_integer.clone(),
+    };
+    let candidate = solver.solve(&repair)?;
+    Ok((candidate.status == SolveStatus::Optimal
+        && candidate.diagnostics(problem).is_verified(tolerance))
+    .then_some(candidate))
 }
 
 #[derive(Default, Clone, Copy)]
@@ -489,11 +618,17 @@ struct SearchStatistics {
 fn pop_node(frontier: &mut Vec<NodeBounds>, selection: NodeSelection) -> NodeBounds {
     let index = match selection {
         NodeSelection::DepthFirst => frontier.len() - 1,
-        NodeSelection::BestBound => frontier.iter().enumerate().min_by(|(_, a), (_, b)| {
-            a.lower_bound.unwrap_or(f64::NEG_INFINITY)
-                .total_cmp(&b.lower_bound.unwrap_or(f64::NEG_INFINITY))
-                .then_with(|| b.depth.cmp(&a.depth))
-        }).map(|(index, _)| index).expect("non-empty frontier"),
+        NodeSelection::BestBound => frontier
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                a.lower_bound
+                    .unwrap_or(f64::NEG_INFINITY)
+                    .total_cmp(&b.lower_bound.unwrap_or(f64::NEG_INFINITY))
+                    .then_with(|| b.depth.cmp(&a.depth))
+            })
+            .map(|(index, _)| index)
+            .expect("non-empty frontier"),
     };
     frontier.swap_remove(index)
 }
@@ -504,13 +639,19 @@ fn gap_satisfied(
     absolute_tolerance: f64,
     relative_tolerance: f64,
 ) -> bool {
-    let Some(bound) = best_bound else { return false };
+    let Some(bound) = best_bound else {
+        return false;
+    };
     let gap = (incumbent - bound).max(0.0);
     gap <= absolute_tolerance || gap / incumbent.abs().max(1.0) <= relative_tolerance
 }
 
 fn open_best_bound(stack: &[NodeBounds], current: Option<f64>) -> Option<f64> {
-    stack.iter().filter_map(|node| node.lower_bound).chain(current).reduce(f64::min)
+    stack
+        .iter()
+        .filter_map(|node| node.lower_bound)
+        .chain(current)
+        .reduce(f64::min)
 }
 
 fn report(
@@ -523,10 +664,16 @@ fn report(
     let has_incumbent = !solution.variable_values.is_empty();
     let absolute_gap = if has_incumbent {
         best_bound.map(|bound| (solution.objective_value - bound).max(0.0))
-    } else { None };
+    } else {
+        None
+    };
     let relative_gap = absolute_gap.map(|gap| gap / solution.objective_value.abs().max(1.0));
     BranchAndBoundReport {
-        solution, nodes_explored, best_bound, absolute_gap, relative_gap,
+        solution,
+        nodes_explored,
+        best_bound,
+        absolute_gap,
+        relative_gap,
         nodes_pruned_infeasible: statistics.nodes_pruned_infeasible,
         nodes_pruned_by_bound: statistics.nodes_pruned_by_bound,
         maximum_depth: statistics.maximum_depth,
@@ -540,20 +687,26 @@ fn report(
 }
 
 struct PseudoCosts {
-    down_sum: Vec<f64>, down_count: Vec<usize>,
-    up_sum: Vec<f64>, up_count: Vec<usize>,
+    down_sum: Vec<f64>,
+    down_count: Vec<usize>,
+    up_sum: Vec<f64>,
+    up_count: Vec<usize>,
 }
 
 impl PseudoCosts {
     fn new(variables: usize) -> Self {
         Self {
-            down_sum: vec![0.0; variables], down_count: vec![0; variables],
-            up_sum: vec![0.0; variables], up_count: vec![0; variables],
+            down_sum: vec![0.0; variables],
+            down_count: vec![0; variables],
+            up_sum: vec![0.0; variables],
+            up_count: vec![0; variables],
         }
     }
 
     fn observe(&mut self, origin: BranchOrigin, objective: f64) {
-        if origin.distance <= 0.0 { return; }
+        if origin.distance <= 0.0 {
+            return;
+        }
         let cost = ((objective - origin.parent_objective) / origin.distance).max(0.0);
         match origin.direction {
             BranchDirection::Down => {
@@ -570,7 +723,9 @@ impl PseudoCosts {
     fn score(&self, variable: usize, fraction: f64) -> Option<f64> {
         let down_count = self.down_count[variable];
         let up_count = self.up_count[variable];
-        if down_count == 0 || up_count == 0 { return None; }
+        if down_count == 0 || up_count == 0 {
+            return None;
+        }
         let down = self.down_sum[variable] / down_count as f64 * fraction;
         let up = self.up_sum[variable] / up_count as f64 * (1.0 - fraction);
         Some(down.min(up) + 0.1 * down.max(up))
@@ -589,12 +744,18 @@ fn branching_variable(
     }
     let mut best: Option<(usize, f64, f64)> = None;
     for (variable, &integer) in is_integer.iter().enumerate() {
-        if !integer { continue; }
+        if !integer {
+            continue;
+        }
         let value = solution.variable_values[variable];
         let fraction = value - value.floor();
         let distance = fraction.min(1.0 - fraction);
-        if distance <= tolerance { continue; }
-        let Some(score) = pseudo_costs.score(variable, fraction) else { continue };
+        if distance <= tolerance {
+            continue;
+        }
+        let Some(score) = pseudo_costs.score(variable, fraction) else {
+            continue;
+        };
         if best.map_or(true, |(_, _, current)| score > current) {
             best = Some((variable, value, score));
         }
@@ -603,10 +764,9 @@ fn branching_variable(
         .or_else(|| most_fractional_integer_variable(solution, is_integer, tolerance))
 }
 
-/// Tighten bounds implied by rows containing exactly one nonzero coefficient.
-/// Repeats are unnecessary because singleton rows do not depend on other
-/// variables. Integer variables are rounded inward to their lattice.
-fn propagate_singleton_bounds(
+/// Iteratively tighten bounds implied by all row activities. Each variable is
+/// isolated against the minimum/maximum contribution of the other variables.
+fn propagate_row_bounds(
     problem: &Problem,
     bounds: &mut [Bound],
     tolerance: f64,
@@ -616,36 +776,168 @@ fn propagate_singleton_bounds(
         entries_by_row[row].push((column, value));
     }
     let mut tightened = 0;
-    for (row, entries) in entries_by_row.iter().enumerate() {
-        if entries.len() != 1 { continue; }
-        let (column, coefficient) = entries[0];
-        let row_bound = problem.row_bounds[row];
-        let mut implied = if coefficient > 0.0 {
-            Bound {
-                lower: row_bound.lower.map(|value| value / coefficient),
-                upper: row_bound.upper.map(|value| value / coefficient),
+    for _ in 0..8 {
+        let before = tightened;
+        for (row, entries) in entries_by_row.iter().enumerate() {
+            let row_bound = problem.row_bounds[row];
+            let (minimum, maximum) = row_activity(entries, None, bounds);
+            if row_bound
+                .lower
+                .is_some_and(|lower| maximum < lower - tolerance)
+                || row_bound
+                    .upper
+                    .is_some_and(|upper| minimum > upper + tolerance)
+            {
+                return Err(());
             }
-        } else {
-            Bound {
-                lower: row_bound.upper.map(|value| value / coefficient),
-                upper: row_bound.lower.map(|value| value / coefficient),
+            for &(column, coefficient) in entries {
+                let (other_minimum, other_maximum) = row_activity(entries, Some(column), bounds);
+                let mut implied = Bound::free();
+                if coefficient > 0.0 {
+                    implied.lower = row_bound.lower.and_then(|value| {
+                        other_maximum
+                            .is_finite()
+                            .then_some((value - other_maximum) / coefficient)
+                    });
+                    implied.upper = row_bound.upper.and_then(|value| {
+                        other_minimum
+                            .is_finite()
+                            .then_some((value - other_minimum) / coefficient)
+                    });
+                } else {
+                    implied.lower = row_bound.upper.and_then(|value| {
+                        other_minimum
+                            .is_finite()
+                            .then_some((value - other_minimum) / coefficient)
+                    });
+                    implied.upper = row_bound.lower.and_then(|value| {
+                        other_maximum
+                            .is_finite()
+                            .then_some((value - other_maximum) / coefficient)
+                    });
+                }
+                if problem.is_integer[column] {
+                    implied.lower = implied.lower.map(|value| (value - tolerance).ceil());
+                    implied.upper = implied.upper.map(|value| (value + tolerance).floor());
+                }
+                let old = bounds[column];
+                let new = Bound {
+                    lower: tighter_lower(old.lower, implied.lower),
+                    upper: tighter_upper(old.upper, implied.upper),
+                };
+                if matches!((new.lower, new.upper), (Some(lower), Some(upper)) if lower > upper) {
+                    return Err(());
+                }
+                if new != old {
+                    tightened += 1;
+                    bounds[column] = new;
+                }
             }
-        };
-        if problem.is_integer[column] {
-            implied.lower = implied.lower.map(|value| (value - tolerance).ceil());
-            implied.upper = implied.upper.map(|value| (value + tolerance).floor());
         }
-        let old = bounds[column];
-        let new = Bound {
-            lower: tighter_lower(old.lower, implied.lower),
-            upper: tighter_upper(old.upper, implied.upper),
-        };
-        if matches!((new.lower, new.upper), (Some(lower), Some(upper)) if lower > upper) {
-            return Err(());
+        if tightened == before {
+            break;
         }
-        if new != old { tightened += 1; bounds[column] = new; }
     }
     Ok(tightened)
+}
+
+fn row_activity(entries: &[(usize, f64)], excluded: Option<usize>, bounds: &[Bound]) -> (f64, f64) {
+    let mut minimum = 0.0;
+    let mut maximum = 0.0;
+    for &(column, coefficient) in entries {
+        if excluded == Some(column) {
+            continue;
+        }
+        let bound = bounds[column];
+        if coefficient > 0.0 {
+            minimum += coefficient * bound.lower.unwrap_or(f64::NEG_INFINITY);
+            maximum += coefficient * bound.upper.unwrap_or(f64::INFINITY);
+        } else {
+            minimum += coefficient * bound.upper.unwrap_or(f64::INFINITY);
+            maximum += coefficient * bound.lower.unwrap_or(f64::NEG_INFINITY);
+        }
+    }
+    (minimum, maximum)
+}
+
+fn add_binary_cover_cuts(problem: &Problem, tolerance: f64) -> Result<Problem, OptimizeError> {
+    let mut rows = vec![Vec::<(usize, f64)>::new(); problem.constraints.rows()];
+    for (row, column, value) in problem.constraints.iter_entries() {
+        rows[row].push((column, value));
+    }
+    let mut cuts = Vec::<Vec<(usize, f64)>>::new();
+    for (row, entries) in rows.iter().enumerate() {
+        let Some(capacity) = problem.row_bounds[row].upper else {
+            continue;
+        };
+        if entries.is_empty()
+            || entries.iter().any(|&(column, coefficient)| {
+                coefficient <= 0.0
+                    || !problem.is_integer[column]
+                    || problem.var_bounds[column]
+                        .lower
+                        .unwrap_or(f64::NEG_INFINITY)
+                        < -tolerance
+                    || problem.var_bounds[column].upper.unwrap_or(f64::INFINITY) > 1.0 + tolerance
+            })
+        {
+            continue;
+        }
+        let mut cover = entries.clone();
+        cover.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let mut sum = 0.0;
+        let length = cover
+            .iter()
+            .position(|entry| {
+                sum += entry.1;
+                sum > capacity + tolerance
+            })
+            .map(|index| index + 1);
+        let Some(length) = length else { continue };
+        cover.truncate(length);
+        let mut index = cover.len();
+        while index > 0 {
+            index -= 1;
+            if sum - cover[index].1 > capacity + tolerance {
+                sum -= cover[index].1;
+                cover.remove(index);
+            }
+        }
+        cuts.push(cover.into_iter().map(|(column, _)| (column, 1.0)).collect());
+    }
+    if cuts.is_empty() {
+        return Ok(problem.clone());
+    }
+    let total_rows = rows.len() + cuts.len();
+    let mut row_pointers = Vec::with_capacity(total_rows + 1);
+    let mut column_indices = Vec::new();
+    let mut values = Vec::new();
+    row_pointers.push(0);
+    for entries in rows.iter().chain(&cuts) {
+        for &(column, value) in entries {
+            column_indices.push(column);
+            values.push(value);
+        }
+        row_pointers.push(values.len());
+    }
+    let mut row_bounds = problem.row_bounds.clone();
+    row_bounds.extend(cuts.iter().map(|cover| Bound {
+        lower: None,
+        upper: Some(cover.len() as f64 - 1.0),
+    }));
+    Ok(Problem {
+        objective: problem.objective.clone(),
+        constraints: CsrMatrix::new(
+            total_rows,
+            problem.objective.len(),
+            row_pointers,
+            column_indices,
+            values,
+        )?,
+        row_bounds,
+        var_bounds: problem.var_bounds.clone(),
+        is_integer: problem.is_integer.clone(),
+    })
 }
 
 /// Finds the integer-restricted variable furthest from an integer
@@ -702,7 +994,13 @@ mod tests {
             row_ptr.push(col_indices.len());
         }
         let constraints = CsrMatrix::new(m, n, row_ptr, col_indices, values).unwrap();
-        Problem { objective, constraints, row_bounds, var_bounds, is_integer }
+        Problem {
+            objective,
+            constraints,
+            row_bounds,
+            var_bounds,
+            is_integer,
+        }
     }
 
     #[test]
@@ -718,10 +1016,25 @@ mod tests {
             vec![-3.0, -2.0],
             vec![vec![1.0, 1.0], vec![1.0, 0.0]],
             vec![
-                Bound { lower: None, upper: Some(4.0) },
-                Bound { lower: None, upper: Some(3.0) },
+                Bound {
+                    lower: None,
+                    upper: Some(4.0),
+                },
+                Bound {
+                    lower: None,
+                    upper: Some(3.0),
+                },
             ],
-            vec![Bound { lower: Some(0.0), upper: None }, Bound { lower: Some(0.0), upper: Some(10.0) }],
+            vec![
+                Bound {
+                    lower: Some(0.0),
+                    upper: None,
+                },
+                Bound {
+                    lower: Some(0.0),
+                    upper: Some(10.0),
+                },
+            ],
             vec![false, false],
         );
         let solution = BranchAndBoundSolver::default().solve(&problem).unwrap();
@@ -747,17 +1060,40 @@ mod tests {
             vec![-5.0, -4.0],
             vec![vec![6.0, 4.0], vec![1.0, 2.0]],
             vec![
-                Bound { lower: None, upper: Some(24.0) },
-                Bound { lower: None, upper: Some(6.0) },
+                Bound {
+                    lower: None,
+                    upper: Some(24.0),
+                },
+                Bound {
+                    lower: None,
+                    upper: Some(6.0),
+                },
             ],
-            vec![Bound { lower: Some(0.0), upper: None }, Bound { lower: Some(0.0), upper: None }],
+            vec![
+                Bound {
+                    lower: Some(0.0),
+                    upper: None,
+                },
+                Bound {
+                    lower: Some(0.0),
+                    upper: None,
+                },
+            ],
             vec![true, true],
         );
 
         let solution = BranchAndBoundSolver::default().solve(&problem).unwrap();
         assert_eq!(solution.status, SolveStatus::Optimal);
-        assert!((solution.variable_values[0] - 4.0).abs() < 1e-6, "x = {}", solution.variable_values[0]);
-        assert!((solution.variable_values[1] - 0.0).abs() < 1e-6, "y = {}", solution.variable_values[1]);
+        assert!(
+            (solution.variable_values[0] - 4.0).abs() < 1e-6,
+            "x = {}",
+            solution.variable_values[0]
+        );
+        assert!(
+            (solution.variable_values[1] - 0.0).abs() < 1e-6,
+            "y = {}",
+            solution.variable_values[1]
+        );
         assert!((solution.objective_value - (-20.0)).abs() < 1e-6);
     }
 
@@ -772,11 +1108,23 @@ mod tests {
         let problem = dense_problem(
             vec![-6.0, -10.0, -12.0],
             vec![vec![1.0, 2.0, 3.0]],
-            vec![Bound { lower: None, upper: Some(5.0) }],
+            vec![Bound {
+                lower: None,
+                upper: Some(5.0),
+            }],
             vec![
-                Bound { lower: Some(0.0), upper: Some(1.0) },
-                Bound { lower: Some(0.0), upper: Some(1.0) },
-                Bound { lower: Some(0.0), upper: Some(1.0) },
+                Bound {
+                    lower: Some(0.0),
+                    upper: Some(1.0),
+                },
+                Bound {
+                    lower: Some(0.0),
+                    upper: Some(1.0),
+                },
+                Bound {
+                    lower: Some(0.0),
+                    upper: Some(1.0),
+                },
             ],
             vec![true, true, true],
         );
@@ -799,7 +1147,10 @@ mod tests {
             vec![1.0],
             vec![vec![2.0]],
             vec![Bound::fixed(1.0)],
-            vec![Bound { lower: Some(0.0), upper: Some(10.0) }],
+            vec![Bound {
+                lower: Some(0.0),
+                upper: Some(10.0),
+            }],
             vec![true],
         );
 
@@ -816,8 +1167,20 @@ mod tests {
         let problem = dense_problem(
             vec![1.0, 1.0],
             vec![vec![1.0, 1.0]],
-            vec![Bound { lower: Some(4.0), upper: None }],
-            vec![Bound { lower: Some(0.0), upper: None }, Bound { lower: Some(0.0), upper: None }],
+            vec![Bound {
+                lower: Some(4.0),
+                upper: None,
+            }],
+            vec![
+                Bound {
+                    lower: Some(0.0),
+                    upper: None,
+                },
+                Bound {
+                    lower: Some(0.0),
+                    upper: None,
+                },
+            ],
             vec![true, true],
         );
 
@@ -836,8 +1199,14 @@ mod tests {
         let mut problem = dense_problem(
             vec![1.0],
             vec![vec![1.0]],
-            vec![Bound { lower: None, upper: Some(1.0) }],
-            vec![Bound { lower: Some(0.0), upper: None }],
+            vec![Bound {
+                lower: None,
+                upper: Some(1.0),
+            }],
+            vec![Bound {
+                lower: Some(0.0),
+                upper: None,
+            }],
             vec![true],
         );
         problem.is_integer = vec![true, true]; // wrong length on purpose
@@ -851,12 +1220,24 @@ mod tests {
             vec![-5.0, -4.0],
             vec![vec![6.0, 4.0], vec![1.0, 2.0]],
             vec![
-                Bound { lower: None, upper: Some(24.0) },
-                Bound { lower: None, upper: Some(6.0) },
+                Bound {
+                    lower: None,
+                    upper: Some(24.0),
+                },
+                Bound {
+                    lower: None,
+                    upper: Some(6.0),
+                },
             ],
             vec![
-                Bound { lower: Some(0.0), upper: None },
-                Bound { lower: Some(0.0), upper: None },
+                Bound {
+                    lower: Some(0.0),
+                    upper: None,
+                },
+                Bound {
+                    lower: Some(0.0),
+                    upper: None,
+                },
             ],
             vec![true, true],
         );
@@ -886,12 +1267,24 @@ mod tests {
             vec![-5.0, -4.0],
             vec![vec![6.0, 4.0], vec![1.0, 2.0]],
             vec![
-                Bound { lower: None, upper: Some(24.0) },
-                Bound { lower: None, upper: Some(6.0) },
+                Bound {
+                    lower: None,
+                    upper: Some(24.0),
+                },
+                Bound {
+                    lower: None,
+                    upper: Some(6.0),
+                },
             ],
             vec![
-                Bound { lower: Some(0.0), upper: None },
-                Bound { lower: Some(0.0), upper: None },
+                Bound {
+                    lower: Some(0.0),
+                    upper: None,
+                },
+                Bound {
+                    lower: Some(0.0),
+                    upper: None,
+                },
             ],
             vec![true, true],
         );
@@ -909,10 +1302,18 @@ mod tests {
     #[test]
     fn report_accounts_for_pruning_and_depth() {
         let problem = dense_problem(
-            vec![1.0], vec![vec![2.0]], vec![Bound::fixed(1.0)],
-            vec![Bound { lower: Some(0.0), upper: Some(10.0) }], vec![true],
+            vec![1.0],
+            vec![vec![2.0]],
+            vec![Bound::fixed(1.0)],
+            vec![Bound {
+                lower: Some(0.0),
+                upper: Some(10.0),
+            }],
+            vec![true],
         );
-        let report = BranchAndBoundSolver::default().solve_with_report(&problem).unwrap();
+        let report = BranchAndBoundSolver::default()
+            .solve_with_report(&problem)
+            .unwrap();
         assert_eq!(report.termination, BranchAndBoundTermination::Exhausted);
         assert_eq!(report.nodes_pruned_infeasible, 1);
         assert_eq!(report.maximum_depth, 0);
@@ -922,13 +1323,37 @@ mod tests {
     #[test]
     fn feasible_warm_incumbent_is_used_at_a_node_limit() {
         let problem = dense_problem(
-            vec![-5.0, -4.0], vec![vec![6.0, 4.0], vec![1.0, 2.0]],
-            vec![Bound { lower: None, upper: Some(24.0) }, Bound { lower: None, upper: Some(6.0) }],
-            vec![Bound { lower: Some(0.0), upper: None }, Bound { lower: Some(0.0), upper: None }],
+            vec![-5.0, -4.0],
+            vec![vec![6.0, 4.0], vec![1.0, 2.0]],
+            vec![
+                Bound {
+                    lower: None,
+                    upper: Some(24.0),
+                },
+                Bound {
+                    lower: None,
+                    upper: Some(6.0),
+                },
+            ],
+            vec![
+                Bound {
+                    lower: Some(0.0),
+                    upper: None,
+                },
+                Bound {
+                    lower: Some(0.0),
+                    upper: None,
+                },
+            ],
             vec![true, true],
         );
-        let solver = BranchAndBoundSolver { max_nodes: 1, ..Default::default() };
-        let report = solver.solve_with_report_warm(&problem, Some(&[4.0, 0.0])).unwrap();
+        let solver = BranchAndBoundSolver {
+            max_nodes: 1,
+            ..Default::default()
+        };
+        let report = solver
+            .solve_with_report_warm(&problem, Some(&[4.0, 0.0]))
+            .unwrap();
         assert_eq!(report.solution.status, SolveStatus::IterationLimit);
         assert_eq!(report.solution.variable_values, vec![4.0, 0.0]);
         assert_eq!(report.solution.objective_value, -20.0);
@@ -937,20 +1362,43 @@ mod tests {
     #[test]
     fn infeasible_warm_incumbent_is_rejected() {
         let problem = dense_problem(
-            vec![-1.0], vec![vec![1.0]], vec![Bound { lower: None, upper: Some(1.0) }],
-            vec![Bound { lower: Some(0.0), upper: None }], vec![true],
+            vec![-1.0],
+            vec![vec![1.0]],
+            vec![Bound {
+                lower: None,
+                upper: Some(1.0),
+            }],
+            vec![Bound {
+                lower: Some(0.0),
+                upper: None,
+            }],
+            vec![true],
         );
         let result = BranchAndBoundSolver::default().solve_with_report_warm(&problem, Some(&[2.0]));
-        assert!(matches!(result, Err(OptimizeError::InvalidConfiguration(_))));
+        assert!(matches!(
+            result,
+            Err(OptimizeError::InvalidConfiguration(_))
+        ));
     }
 
     #[test]
     fn singleton_propagation_tightens_an_integer_domain_before_relaxation() {
         let problem = dense_problem(
-            vec![1.0], vec![vec![2.0]], vec![Bound { lower: Some(4.0), upper: None }],
-            vec![Bound { lower: Some(0.0), upper: None }], vec![true],
+            vec![1.0],
+            vec![vec![2.0]],
+            vec![Bound {
+                lower: Some(4.0),
+                upper: None,
+            }],
+            vec![Bound {
+                lower: Some(0.0),
+                upper: None,
+            }],
+            vec![true],
         );
-        let report = BranchAndBoundSolver::default().solve_with_report(&problem).unwrap();
+        let report = BranchAndBoundSolver::default()
+            .solve_with_report(&problem)
+            .unwrap();
         assert_eq!(report.solution.status, SolveStatus::Optimal);
         assert_eq!(report.solution.variable_values, vec![2.0]);
         assert_eq!(report.bounds_tightened, 1);
@@ -958,16 +1406,115 @@ mod tests {
     }
 
     #[test]
+    fn general_row_propagation_uses_other_variable_bounds() {
+        let problem = dense_problem(
+            vec![0.0, 0.0],
+            vec![vec![1.0, 1.0]],
+            vec![Bound {
+                lower: None,
+                upper: Some(3.0),
+            }],
+            vec![
+                Bound {
+                    lower: Some(0.0),
+                    upper: Some(10.0),
+                },
+                Bound::fixed(2.0),
+            ],
+            vec![true, false],
+        );
+        let mut bounds = problem.var_bounds.clone();
+        let tightened = propagate_row_bounds(&problem, &mut bounds, 1e-9).unwrap();
+        assert!(tightened > 0);
+        assert_eq!(bounds[0].upper, Some(1.0));
+    }
+
+    #[test]
+    fn rounding_repair_resolves_continuous_variables() {
+        let problem = dense_problem(
+            vec![0.0, 1.0],
+            vec![vec![1.0, 1.0]],
+            vec![Bound::fixed(1.2)],
+            vec![
+                Bound {
+                    lower: Some(0.0),
+                    upper: Some(1.0),
+                },
+                Bound {
+                    lower: Some(0.0),
+                    upper: Some(1.0),
+                },
+            ],
+            vec![true, false],
+        );
+        let relaxation = Solution {
+            variable_values: vec![0.6, 0.6],
+            objective_value: 0.6,
+            status: SolveStatus::Optimal,
+        };
+        let repaired = rounded_incumbent(
+            &problem,
+            &relaxation,
+            1e-9,
+            &RevisedSimplexSolver::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!((repaired.variable_values[0] - 1.0).abs() < 1e-9);
+        assert!((repaired.variable_values[1] - 0.2).abs() < 1e-7);
+        assert!(repaired.diagnostics(&problem).is_verified(1e-7));
+    }
+
+    #[test]
+    fn binary_knapsack_generates_a_valid_minimal_cover_cut() {
+        let problem = dense_problem(
+            vec![-1.0; 3],
+            vec![vec![6.0, 5.0, 4.0]],
+            vec![Bound {
+                lower: None,
+                upper: Some(9.0),
+            }],
+            vec![
+                Bound {
+                    lower: Some(0.0),
+                    upper: Some(1.0)
+                };
+                3
+            ],
+            vec![true; 3],
+        );
+        let strengthened = add_binary_cover_cuts(&problem, 1e-9).unwrap();
+        assert_eq!(strengthened.constraints.rows(), 2);
+        assert_eq!(strengthened.row_bounds[1].upper, Some(1.0));
+        let cut: Vec<_> = strengthened
+            .constraints
+            .iter_entries()
+            .filter(|(row, _, _)| *row == 1)
+            .collect();
+        assert_eq!(cut, vec![(1, 0, 1.0), (1, 1, 1.0)]);
+    }
+
+    #[test]
     fn pseudo_costs_learn_directional_balanced_gain() {
         let mut costs = PseudoCosts::new(1);
-        costs.observe(BranchOrigin {
-            variable: 0, direction: BranchDirection::Down,
-            parent_objective: 10.0, distance: 0.25,
-        }, 11.0);
-        costs.observe(BranchOrigin {
-            variable: 0, direction: BranchDirection::Up,
-            parent_objective: 10.0, distance: 0.75,
-        }, 13.0);
+        costs.observe(
+            BranchOrigin {
+                variable: 0,
+                direction: BranchDirection::Down,
+                parent_objective: 10.0,
+                distance: 0.25,
+            },
+            11.0,
+        );
+        costs.observe(
+            BranchOrigin {
+                variable: 0,
+                direction: BranchDirection::Up,
+                parent_objective: 10.0,
+                distance: 0.75,
+            },
+            13.0,
+        );
         let score = costs.score(0, 0.25).unwrap();
         assert!((score - 1.3).abs() < 1e-12);
     }
@@ -975,15 +1522,28 @@ mod tests {
     #[test]
     fn rounding_heuristic_reports_a_valid_incumbent() {
         let problem = dense_problem(
-            vec![-2.0, -1.0], vec![vec![1.0, 1.0]],
-            vec![Bound { lower: None, upper: Some(1.4) }],
+            vec![-2.0, -1.0, 0.0],
+            vec![vec![1.0, 1.0, 1.0]],
+            vec![Bound {
+                lower: None,
+                upper: Some(1.4),
+            }],
             vec![
-                Bound { lower: Some(0.0), upper: Some(1.0) },
-                Bound { lower: Some(0.0), upper: Some(1.0) },
+                Bound {
+                    lower: Some(0.0),
+                    upper: Some(1.0),
+                },
+                Bound {
+                    lower: Some(0.0),
+                    upper: Some(1.0),
+                },
+                Bound::fixed(0.0),
             ],
-            vec![true, true],
+            vec![true, true, false],
         );
-        let report = BranchAndBoundSolver::default().solve_with_report(&problem).unwrap();
+        let report = BranchAndBoundSolver::default()
+            .solve_with_report(&problem)
+            .unwrap();
         assert!(report.heuristic_attempts > 0);
         assert!(report.heuristic_successes > 0);
         assert_eq!(report.solution.objective_value, -2.0);
