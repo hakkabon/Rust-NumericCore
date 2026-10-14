@@ -258,7 +258,7 @@ pub enum CircuitDevice {
 }
 
 impl CircuitDevice {
-    fn name(&self) -> &str {
+    pub fn name(&self) -> &str {
         match self {
             Self::Resistor { name, .. }
             | Self::Capacitor { name, .. }
@@ -499,6 +499,18 @@ impl CircuitModel {
     }
     pub fn unknown_names(&self) -> &[String] {
         &self.unknown_names
+    }
+    pub fn node_unknown_index(&self, node: usize) -> Result<Option<usize>, OptimizeError> {
+        self.node_unknowns
+            .get(node)
+            .copied()
+            .ok_or_else(|| invalid("node is out of range"))
+    }
+    pub fn branch_unknown_index(&self, device: usize) -> Result<Option<usize>, OptimizeError> {
+        self.branch_unknowns
+            .get(device)
+            .copied()
+            .ok_or_else(|| invalid("device is out of range"))
     }
     pub fn initial_state(&self) -> Vec<f64> {
         let mut state = vec![0.; self.unknown_count()];

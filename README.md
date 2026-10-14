@@ -144,6 +144,10 @@ Phase 42 deepens nonlinear and transient circuit analysis with VCCS/VCVS
 controlled sources, an analytic level-1 NMOS model, source-stepped/gmin DC
 continuation, and deterministic pulse breakpoints for discontinuity-aware time
 integration.
+Phase 43 adds small-signal AC sweeps by linearizing the nonlinear MNA system at
+a DC operating point and solving its real block complex form. It also adds
+bounded response-driven circuit optimization with finite-difference design
+sensitivities and reusable L-BFGS-B convergence diagnostics.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

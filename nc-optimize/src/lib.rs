@@ -174,6 +174,11 @@ pub use circuit::{
     CircuitDcContinuationOptions, CircuitDevice, CircuitDiagnostics, CircuitModel, CircuitNode,
     CircuitOperatingPoint, CircuitSource, CircuitWaveform,
 };
+pub mod circuit_ac;
+pub use circuit_ac::{
+    optimize_circuit_ac, CircuitAcExcitation, CircuitAcPoint, CircuitAcSweep, CircuitAcTarget,
+    CircuitComplex, CircuitDesignVariable, CircuitOptimizationOptions, CircuitOptimizationResult,
+};
 
 pub mod scaling;
 pub use scaling::{ScaledProblem, ScaledSolver, ScalingOptions, ScalingReport};
