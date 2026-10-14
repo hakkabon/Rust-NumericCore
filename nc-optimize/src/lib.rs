@@ -181,9 +181,9 @@ pub use circuit_ac::{
 };
 pub mod fem;
 pub use fem::{
-    FemConstraint, FemNodalLoad, FemNode2D, FemStaticResult, ThermalFemModel, ThermalMaterial,
-    ThermalTriangle3, TrussElement2D, TrussElementResult, TrussFemModel, TrussMaterial,
-    TrussStaticResult,
+    FemConstraint, FemDynamicOptions, FemDynamicResult, FemDynamicState, FemModalResult,
+    FemNodalLoad, FemNode2D, FemStaticResult, ThermalFemModel, ThermalMaterial, ThermalTriangle3,
+    TrussElement2D, TrussElementResult, TrussFemModel, TrussMaterial, TrussStaticResult,
 };
 
 pub mod scaling;

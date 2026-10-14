@@ -152,6 +152,9 @@ Phase 44 establishes finite-element analysis with sparse global assembly,
 Dirichlet elimination, reaction recovery, constant-gradient thermal triangles,
 and planar truss elements with strain, stress, force, energy, and residual
 diagnostics.
+Phase 45 adds consistent structural mass assembly, constrained mass-normalized
+modal analysis, Rayleigh damping, and average-acceleration Newmark transient
+integration with energy and equilibrium diagnostics.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's
