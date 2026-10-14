@@ -121,6 +121,9 @@ derivative-free direction-set method as complementary advanced nonlinear paths.
 Phase 36 adds bound-aware Nelder-Mead and deterministic coordinate pattern
 search, including evaluation budgets, cancellation, and convergence-geometry
 diagnostics for value-only and nonsmooth objectives.
+Phase 37 adds first-class square nonlinear equation systems with damped Newton,
+matrix-free Newton-GMRES, scaling, Jacobian reuse, adaptive parameter
+continuation, and pseudo-transient continuation.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

@@ -147,6 +147,15 @@ pub use derivative_free::{minimize_nelder_mead, minimize_nelder_mead_with_observ
     DerivativeFreeIteration, DerivativeFreeTermination, NelderMeadOptions,
     NelderMeadResult, PatternSearchOptions, PatternSearchResult};
 
+pub mod nonlinear_equations;
+pub use nonlinear_equations::{continue_solution, solve_equation_model, solve_newton_krylov,
+    solve_newton_krylov_with_observer, solve_nonlinear_system,
+    solve_nonlinear_system_with_observer, solve_pseudo_transient,
+    solve_pseudo_transient_with_observer, ContinuationOptions, ContinuationResult,
+    ContinuationStage, NonlinearEquationModel, NonlinearSystemEvaluation,
+    NonlinearSystemIteration, NonlinearSystemOptions, NonlinearSystemResult,
+    NonlinearSystemTermination, PseudoTransientOptions};
+
 pub mod scaling;
 pub use scaling::{ScaledProblem, ScaledSolver, ScalingOptions, ScalingReport};
 
