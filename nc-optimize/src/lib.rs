@@ -169,6 +169,12 @@ pub use engineering_model::{
     EngineeringParameter, EngineeringPort, EngineeringUnknown, EngineeringUnknownRole,
 };
 
+pub mod circuit;
+pub use circuit::{
+    CircuitDevice, CircuitDiagnostics, CircuitModel, CircuitNode, CircuitOperatingPoint,
+    CircuitSource, CircuitWaveform,
+};
+
 pub mod scaling;
 pub use scaling::{ScaledProblem, ScaledSolver, ScalingOptions, ScalingReport};
 
