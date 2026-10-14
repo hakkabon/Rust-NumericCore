@@ -132,6 +132,10 @@ Phase 39 adds adaptive Dormand-Prince ODE integration, cubic Hermite dense
 output, directional event location, and adaptive backward-Euler integration
 for residual-form index-1 DAEs and singular mass matrices, with analytic
 Jacobian blocks and explicit step/Newton diagnostics.
+Phase 40 adds a shared component-based engineering representation with typed
+unknowns and parameters, oriented topology, portable constitutive expression
+graphs, exact sparse residual/Jacobian stamping, parameter sensitivities, and
+a direct bridge into residual-form DAE integration.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

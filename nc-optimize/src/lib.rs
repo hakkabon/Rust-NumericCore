@@ -163,6 +163,12 @@ pub use time_integration::{
     TimeIntegrationOptions, TimeIntegrationResult, TimeIntegrationTermination, TimePoint,
 };
 
+pub mod engineering_model;
+pub use engineering_model::{
+    EngineeringAssembly, EngineeringElement, EngineeringEquation, EngineeringModel,
+    EngineeringParameter, EngineeringPort, EngineeringUnknown, EngineeringUnknownRole,
+};
+
 pub mod scaling;
 pub use scaling::{ScaledProblem, ScaledSolver, ScalingOptions, ScalingReport};
 
