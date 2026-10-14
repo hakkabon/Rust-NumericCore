@@ -149,6 +149,13 @@ pub use derivative_free::{minimize_nelder_mead, minimize_nelder_mead_with_observ
     NelderMeadResult, ModelBasedOptions, ModelBasedResult, PatternSearchOptions,
     PatternSearchResult};
 
+pub mod constrained_derivative_free;
+pub use constrained_derivative_free::{minimize_constrained_derivative_free,
+    minimize_constrained_derivative_free_with_observer, ConstrainedDerivativeFreeEvaluation,
+    ConstrainedDerivativeFreeIteration, ConstrainedDerivativeFreeOptions,
+    ConstrainedDerivativeFreeResult, ConstrainedDerivativeFreeTermination,
+    DerivativeFreeConstraintKind};
+
 pub mod nonlinear_equations;
 pub use nonlinear_equations::{continue_solution, solve_equation_model, solve_newton_krylov,
     solve_newton_krylov_with_observer, solve_nonlinear_system,
