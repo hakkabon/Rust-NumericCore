@@ -140,6 +140,10 @@ Phase 41 adds a modified-nodal-analysis circuit kernel with explicit ground
 elimination, sparse analytic stamps for R/C/L, independent current and voltage
 sources, and exponential diodes, plus DC operating-point and transient DAE
 entry points, waveforms, branch-current recovery, and residual diagnostics.
+Phase 42 deepens nonlinear and transient circuit analysis with VCCS/VCVS
+controlled sources, an analytic level-1 NMOS model, source-stepped/gmin DC
+continuation, and deterministic pulse breakpoints for discontinuity-aware time
+integration.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

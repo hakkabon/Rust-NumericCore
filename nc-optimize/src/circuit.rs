@@ -109,6 +109,44 @@ impl CircuitWaveform {
             }
         }
     }
+
+    fn breakpoints(&self, start: f64, end: f64) -> Vec<f64> {
+        let Self::Pulse {
+            delay,
+            rise,
+            fall,
+            width,
+            period,
+            ..
+        } = *self
+        else {
+            return vec![];
+        };
+        let (lower, upper) = (start.min(end), start.max(end));
+        let mut result = vec![];
+        let mut cycle = 0usize;
+        loop {
+            let base = delay + cycle as f64 * period;
+            if base > upper {
+                break;
+            }
+            for point in [
+                base,
+                base + rise,
+                base + rise + width,
+                base + rise + width + fall,
+            ] {
+                if point > lower && point < upper {
+                    result.push(point);
+                }
+            }
+            if period == 0.0 {
+                break;
+            }
+            cycle += 1;
+        }
+        result
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -141,6 +179,12 @@ impl CircuitSource {
     }
     fn valid(&self) -> bool {
         self.dc.is_finite() && self.transient.as_ref().map_or(true, CircuitWaveform::valid)
+    }
+
+    fn breakpoints(&self, start: f64, end: f64) -> Vec<f64> {
+        self.transient
+            .as_ref()
+            .map_or_else(Vec::new, |waveform| waveform.breakpoints(start, end))
     }
 }
 
@@ -185,6 +229,32 @@ pub enum CircuitDevice {
         saturation_current: f64,
         thermal_voltage: f64,
     },
+    VoltageControlledCurrentSource {
+        name: String,
+        positive: usize,
+        negative: usize,
+        control_positive: usize,
+        control_negative: usize,
+        transconductance: f64,
+    },
+    VoltageControlledVoltageSource {
+        name: String,
+        positive: usize,
+        negative: usize,
+        control_positive: usize,
+        control_negative: usize,
+        gain: f64,
+        initial_current: f64,
+    },
+    NmosLevel1 {
+        name: String,
+        drain: usize,
+        gate: usize,
+        source: usize,
+        transconductance: f64,
+        threshold: f64,
+        channel_length_modulation: f64,
+    },
 }
 
 impl CircuitDevice {
@@ -195,7 +265,10 @@ impl CircuitDevice {
             | Self::Inductor { name, .. }
             | Self::CurrentSource { name, .. }
             | Self::VoltageSource { name, .. }
-            | Self::Diode { name, .. } => name,
+            | Self::Diode { name, .. }
+            | Self::VoltageControlledCurrentSource { name, .. }
+            | Self::VoltageControlledVoltageSource { name, .. }
+            | Self::NmosLevel1 { name, .. } => name,
         }
     }
     fn nodes(&self) -> (usize, usize) {
@@ -216,10 +289,37 @@ impl CircuitDevice {
                 positive, negative, ..
             } => (positive, negative),
             Self::Diode { anode, cathode, .. } => (anode, cathode),
+            Self::VoltageControlledCurrentSource {
+                positive, negative, ..
+            }
+            | Self::VoltageControlledVoltageSource {
+                positive, negative, ..
+            } => (positive, negative),
+            Self::NmosLevel1 { drain, source, .. } => (drain, source),
         }
     }
     fn has_branch(&self) -> bool {
-        matches!(self, Self::Inductor { .. } | Self::VoltageSource { .. })
+        matches!(
+            self,
+            Self::Inductor { .. }
+                | Self::VoltageSource { .. }
+                | Self::VoltageControlledVoltageSource { .. }
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CircuitDcContinuationOptions {
+    pub steps: usize,
+    pub initial_gmin: f64,
+}
+
+impl Default for CircuitDcContinuationOptions {
+    fn default() -> Self {
+        Self {
+            steps: 8,
+            initial_gmin: 1e-3,
+        }
     }
 }
 
@@ -242,6 +342,7 @@ pub struct CircuitOperatingPoint {
     pub iterations: usize,
     pub termination: NonlinearSystemTermination,
     pub diagnostics: CircuitDiagnostics,
+    pub continuation_steps: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -290,6 +391,24 @@ impl CircuitModel {
                 return Err(invalid("device node is out of range"));
             }
             match device {
+                CircuitDevice::VoltageControlledCurrentSource {
+                    control_positive,
+                    control_negative,
+                    ..
+                }
+                | CircuitDevice::VoltageControlledVoltageSource {
+                    control_positive,
+                    control_negative,
+                    ..
+                } if *control_positive >= nodes.len() || *control_negative >= nodes.len() => {
+                    return Err(invalid("control node is out of range"));
+                }
+                CircuitDevice::NmosLevel1 { gate, .. } if *gate >= nodes.len() => {
+                    return Err(invalid("MOS gate node is out of range"));
+                }
+                _ => {}
+            }
+            match device {
                 CircuitDevice::Resistor { resistance, .. }
                     if !resistance.is_finite() || *resistance <= 0. =>
                 {
@@ -329,6 +448,31 @@ impl CircuitModel {
                     || *thermal_voltage <= 0. =>
                 {
                     return Err(invalid("invalid diode"))
+                }
+                CircuitDevice::VoltageControlledCurrentSource {
+                    transconductance, ..
+                } if !transconductance.is_finite() => {
+                    return Err(invalid("invalid controlled-source transconductance"))
+                }
+                CircuitDevice::VoltageControlledVoltageSource {
+                    gain,
+                    initial_current,
+                    ..
+                } if !gain.is_finite() || !initial_current.is_finite() => {
+                    return Err(invalid("invalid controlled voltage source"))
+                }
+                CircuitDevice::NmosLevel1 {
+                    transconductance,
+                    threshold,
+                    channel_length_modulation,
+                    ..
+                } if !transconductance.is_finite()
+                    || *transconductance <= 0.
+                    || !threshold.is_finite()
+                    || !channel_length_modulation.is_finite()
+                    || *channel_length_modulation < 0. =>
+                {
+                    return Err(invalid("invalid level-1 NMOS"))
                 }
                 _ => {}
             }
@@ -371,6 +515,9 @@ impl CircuitModel {
                     }
                     | CircuitDevice::VoltageSource {
                         initial_current, ..
+                    }
+                    | CircuitDevice::VoltageControlledVoltageSource {
+                        initial_current, ..
                     } => initial_current,
                     _ => 0.,
                 };
@@ -398,7 +545,7 @@ impl CircuitModel {
         state: &[f64],
         derivative: &[f64],
     ) -> Result<EngineeringAssembly, OptimizeError> {
-        self.assemble_mode(time, state, derivative, true)
+        self.assemble_mode(time, state, derivative, true, 1., 0.)
     }
     pub fn dae_evaluation(
         &self,
@@ -427,18 +574,79 @@ impl CircuitModel {
         )
     }
 
+    pub fn transient_breakpoints(&self, start: f64, end: f64) -> Result<Vec<f64>, OptimizeError> {
+        if !start.is_finite() || !end.is_finite() {
+            return Err(invalid("invalid transient interval"));
+        }
+        let mut points = self
+            .devices
+            .iter()
+            .filter_map(|device| match device {
+                CircuitDevice::CurrentSource { source, .. }
+                | CircuitDevice::VoltageSource { source, .. } => Some(source),
+                _ => None,
+            })
+            .flat_map(|source| source.breakpoints(start, end))
+            .collect::<Vec<_>>();
+        points.sort_by(f64::total_cmp);
+        points.dedup_by(|a, b| (*a - *b).abs() <= f64::EPSILON * a.abs().max(b.abs()).max(1.));
+        if end < start {
+            points.reverse();
+        }
+        Ok(points)
+    }
+
     pub fn dc_operating_point(
         &self,
         initial: Option<&[f64]>,
         options: NonlinearSystemOptions,
     ) -> Result<CircuitOperatingPoint, OptimizeError> {
         let start = initial.map_or_else(|| self.initial_state(), |value| value.to_vec());
+        self.solve_dc(&start, options, 1., 0., 0)
+    }
+
+    pub fn dc_operating_point_continuation(
+        &self,
+        initial: Option<&[f64]>,
+        nonlinear_options: NonlinearSystemOptions,
+        continuation: CircuitDcContinuationOptions,
+    ) -> Result<CircuitOperatingPoint, OptimizeError> {
+        if continuation.steps == 0
+            || !continuation.initial_gmin.is_finite()
+            || continuation.initial_gmin < 0.
+        {
+            return Err(invalid("invalid DC continuation options"));
+        }
+        let mut state = initial.map_or_else(|| self.initial_state(), |value| value.to_vec());
+        if state.len() != self.unknown_count() {
+            return Err(invalid("invalid DC initial state"));
+        }
+        let mut result = None;
+        for step in 0..=continuation.steps {
+            let fraction = step as f64 / continuation.steps as f64;
+            let gmin = continuation.initial_gmin * (1. - fraction).powi(3);
+            let solved =
+                self.solve_dc(&state, nonlinear_options.clone(), fraction, gmin, step + 1)?;
+            state = solved.state.clone();
+            result = Some(solved);
+        }
+        Ok(result.unwrap())
+    }
+
+    fn solve_dc(
+        &self,
+        start: &[f64],
+        options: NonlinearSystemOptions,
+        source_scale: f64,
+        gmin: f64,
+        continuation_steps: usize,
+    ) -> Result<CircuitOperatingPoint, OptimizeError> {
         if start.len() != self.unknown_count() {
             return Err(invalid("invalid DC initial state"));
         }
         let zero = self.zero_derivative();
         let solved = solve_nonlinear_system(&start, options, |state| {
-            let assembled = self.assemble_mode(0., state, &zero, false)?;
+            let assembled = self.assemble_mode(0., state, &zero, false, source_scale, gmin)?;
             Ok(NonlinearSystemEvaluation {
                 residuals: assembled.residuals,
                 jacobian: dense(&assembled.jacobian_state),
@@ -453,7 +661,7 @@ impl CircuitModel {
                 index.map(|i| (self.devices[device].name().to_string(), solved.point[i]))
             })
             .collect();
-        let final_assembly = self.assemble_mode(0., &solved.point, &zero, false)?;
+        let final_assembly = self.assemble_mode(0., &solved.point, &zero, false, 1., 0.)?;
         let diagnostics = self.diagnostics(&final_assembly.residuals);
         Ok(CircuitOperatingPoint {
             node_voltages,
@@ -463,6 +671,7 @@ impl CircuitModel {
             iterations: solved.iterations,
             termination: solved.termination,
             diagnostics,
+            continuation_steps,
         })
     }
 
@@ -486,18 +695,27 @@ impl CircuitModel {
         state: &[f64],
         derivative: &[f64],
         transient: bool,
+        source_scale: f64,
+        gmin: f64,
     ) -> Result<EngineeringAssembly, OptimizeError> {
         let n = self.unknown_count();
         if !time.is_finite()
             || state.len() != n
             || derivative.len() != n
             || state.iter().chain(derivative).any(|v| !v.is_finite())
+            || !source_scale.is_finite()
+            || !gmin.is_finite()
+            || gmin < 0.
         {
             return Err(invalid("invalid circuit evaluation point"));
         }
         let mut residual = vec![0.; n];
         let mut jy = vec![vec![0.; n]; n];
         let mut jyd = vec![vec![0.; n]; n];
+        for index in self.node_unknowns.iter().flatten() {
+            residual[*index] += gmin * state[*index];
+            jy[*index][*index] += gmin;
+        }
         for (device_index, device) in self.devices.iter().enumerate() {
             let (positive, negative) = device.nodes();
             let p = self.node_unknowns[positive];
@@ -529,9 +747,12 @@ impl CircuitModel {
                     &mut jy,
                     &mut jyd,
                 ),
-                CircuitDevice::CurrentSource { source, .. } => {
-                    stamp_current(p, m, source.value(time, transient), &mut residual)
-                }
+                CircuitDevice::CurrentSource { source, .. } => stamp_current(
+                    p,
+                    m,
+                    source_scale * source.value(time, transient),
+                    &mut residual,
+                ),
                 CircuitDevice::Diode {
                     saturation_current,
                     thermal_voltage,
@@ -555,7 +776,7 @@ impl CircuitModel {
                 CircuitDevice::VoltageSource { source, .. } => {
                     let branch = self.branch_unknowns[device_index].unwrap();
                     stamp_branch_kcl(p, m, branch, state[branch], &mut residual, &mut jy);
-                    residual[branch] += voltage - source.value(time, transient);
+                    residual[branch] += voltage - source_scale * source.value(time, transient);
                     stamp_voltage(p, m, branch, 1., &mut jy);
                 }
                 CircuitDevice::Inductor { inductance, .. } => {
@@ -571,6 +792,64 @@ impl CircuitModel {
                     if transient {
                         jyd[branch][branch] -= inductance;
                     }
+                }
+                CircuitDevice::VoltageControlledCurrentSource {
+                    control_positive,
+                    control_negative,
+                    transconductance,
+                    ..
+                } => {
+                    let cp = self.node_unknowns[*control_positive];
+                    let cm = self.node_unknowns[*control_negative];
+                    let control = value(state, cp) - value(state, cm);
+                    stamp_controlled_current(
+                        p,
+                        m,
+                        transconductance * control,
+                        &[(cp, *transconductance), (cm, -*transconductance)],
+                        &mut residual,
+                        &mut jy,
+                    );
+                }
+                CircuitDevice::VoltageControlledVoltageSource {
+                    control_positive,
+                    control_negative,
+                    gain,
+                    ..
+                } => {
+                    let branch = self.branch_unknowns[device_index].unwrap();
+                    let cp = self.node_unknowns[*control_positive];
+                    let cm = self.node_unknowns[*control_negative];
+                    stamp_branch_kcl(p, m, branch, state[branch], &mut residual, &mut jy);
+                    residual[branch] += voltage - gain * (value(state, cp) - value(state, cm));
+                    stamp_voltage(p, m, branch, 1., &mut jy);
+                    stamp_voltage(cp, cm, branch, -*gain, &mut jy);
+                }
+                CircuitDevice::NmosLevel1 {
+                    gate,
+                    transconductance,
+                    threshold,
+                    channel_length_modulation,
+                    ..
+                } => {
+                    let g = self.node_unknowns[*gate];
+                    let vgs = value(state, g) - value(state, m);
+                    let vds = voltage;
+                    let (current, gm, gds) = nmos_level1(
+                        vgs,
+                        vds,
+                        *transconductance,
+                        *threshold,
+                        *channel_length_modulation,
+                    );
+                    stamp_controlled_current(
+                        p,
+                        m,
+                        current,
+                        &[(p, gds), (g, gm), (m, -gds - gm)],
+                        &mut residual,
+                        &mut jy,
+                    );
                 }
             }
         }
@@ -640,6 +919,46 @@ fn stamp_branch_kcl(
     }
     if let Some(i) = m {
         jy[i][branch] -= 1.;
+    }
+}
+fn stamp_controlled_current(
+    p: Option<usize>,
+    m: Option<usize>,
+    current: f64,
+    derivatives: &[(Option<usize>, f64)],
+    residual: &mut [f64],
+    jacobian: &mut [Vec<f64>],
+) {
+    stamp_current(p, m, current, residual);
+    for (row, sign) in [(p, 1.), (m, -1.)] {
+        if let Some(row) = row {
+            for &(column, derivative) in derivatives {
+                if let Some(column) = column {
+                    jacobian[row][column] += sign * derivative;
+                }
+            }
+        }
+    }
+}
+fn nmos_level1(vgs: f64, vds: f64, beta: f64, threshold: f64, lambda: f64) -> (f64, f64, f64) {
+    let overdrive = vgs - threshold;
+    if overdrive <= 0. {
+        return (0., 0., 0.);
+    }
+    if vds < overdrive {
+        let base = beta * (overdrive * vds - 0.5 * vds * vds);
+        let modulation = 1. + lambda * vds;
+        let current = base * modulation;
+        let gm = beta * vds * modulation;
+        let gds = beta * (overdrive - vds) * modulation + lambda * base;
+        (current, gm, gds)
+    } else {
+        let base = 0.5 * beta * overdrive * overdrive;
+        (
+            base * (1. + lambda * vds),
+            beta * overdrive * (1. + lambda * vds),
+            lambda * base,
+        )
     }
 }
 fn stamp_voltage(p: Option<usize>, m: Option<usize>, row: usize, factor: f64, jy: &mut [Vec<f64>]) {
@@ -821,5 +1140,159 @@ mod tests {
             .dc_operating_point(Some(&[0.5]), Default::default())
             .unwrap();
         assert!(result.node_voltages[1] > 0. && result.node_voltages[1] < 1.);
+    }
+
+    #[test]
+    fn controlled_sources_and_level_one_nmos_stamp_analytically() {
+        let controlled = CircuitModel::new(
+            vec![
+                CircuitNode {
+                    name: "0".into(),
+                    initial_voltage: 0.,
+                },
+                CircuitNode {
+                    name: "control".into(),
+                    initial_voltage: 0.,
+                },
+                CircuitNode {
+                    name: "out".into(),
+                    initial_voltage: 0.,
+                },
+            ],
+            0,
+            vec![
+                CircuitDevice::VoltageSource {
+                    name: "VC".into(),
+                    positive: 1,
+                    negative: 0,
+                    source: CircuitSource::dc(1.),
+                    initial_current: 0.,
+                },
+                CircuitDevice::VoltageControlledCurrentSource {
+                    name: "G1".into(),
+                    positive: 2,
+                    negative: 0,
+                    control_positive: 1,
+                    control_negative: 0,
+                    transconductance: 2.,
+                },
+                CircuitDevice::Resistor {
+                    name: "R1".into(),
+                    positive: 2,
+                    negative: 0,
+                    resistance: 1.,
+                },
+                CircuitDevice::VoltageControlledVoltageSource {
+                    name: "E1".into(),
+                    positive: 2,
+                    negative: 0,
+                    control_positive: 1,
+                    control_negative: 0,
+                    gain: -2.,
+                    initial_current: 0.,
+                },
+            ],
+        )
+        .unwrap();
+        let result = controlled
+            .dc_operating_point(None, Default::default())
+            .unwrap();
+        assert!((result.node_voltages[2] + 2.).abs() < 1e-12);
+
+        let transistor = CircuitModel::new(
+            vec![
+                CircuitNode {
+                    name: "0".into(),
+                    initial_voltage: 0.,
+                },
+                CircuitNode {
+                    name: "gate".into(),
+                    initial_voltage: 0.,
+                },
+                CircuitNode {
+                    name: "drain".into(),
+                    initial_voltage: 0.,
+                },
+            ],
+            0,
+            vec![
+                CircuitDevice::VoltageSource {
+                    name: "VG".into(),
+                    positive: 1,
+                    negative: 0,
+                    source: CircuitSource::dc(2.),
+                    initial_current: 0.,
+                },
+                CircuitDevice::VoltageSource {
+                    name: "VD".into(),
+                    positive: 2,
+                    negative: 0,
+                    source: CircuitSource::dc(2.),
+                    initial_current: 0.,
+                },
+                CircuitDevice::NmosLevel1 {
+                    name: "M1".into(),
+                    drain: 2,
+                    gate: 1,
+                    source: 0,
+                    transconductance: 1e-3,
+                    threshold: 1.,
+                    channel_length_modulation: 0.,
+                },
+            ],
+        )
+        .unwrap();
+        let result = transistor
+            .dc_operating_point(None, Default::default())
+            .unwrap();
+        let drain_current = result
+            .branch_currents
+            .iter()
+            .find(|(name, _)| name == "VD")
+            .unwrap()
+            .1;
+        assert!((drain_current + 0.5e-3).abs() < 1e-12);
+    }
+
+    #[test]
+    fn dc_continuation_and_pulse_breakpoints_are_explicit() {
+        let pulse = CircuitWaveform::Pulse {
+            low: 0.,
+            high: 1.,
+            delay: 1.,
+            rise: 0.1,
+            fall: 0.1,
+            width: 0.5,
+            period: 2.,
+        };
+        let circuit = CircuitModel::new(
+            nodes(),
+            0,
+            vec![
+                CircuitDevice::Diode {
+                    name: "D1".into(),
+                    anode: 1,
+                    cathode: 0,
+                    saturation_current: 1e-12,
+                    thermal_voltage: 0.026,
+                },
+                CircuitDevice::CurrentSource {
+                    name: "I1".into(),
+                    positive: 0,
+                    negative: 1,
+                    source: CircuitSource::transient(1e-3, pulse),
+                },
+            ],
+        )
+        .unwrap();
+        let result = circuit
+            .dc_operating_point_continuation(None, Default::default(), Default::default())
+            .unwrap();
+        assert_eq!(result.continuation_steps, 9);
+        assert!(result.diagnostics.maximum_kcl_residual < 1e-8);
+        let points = circuit.transient_breakpoints(0., 5.).unwrap();
+        assert_eq!(points.len(), 8);
+        assert!((points[0] - 1.).abs() < 1e-12);
+        assert!((points[7] - 3.7).abs() < 1e-12);
     }
 }

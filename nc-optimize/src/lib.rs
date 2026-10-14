@@ -171,8 +171,8 @@ pub use engineering_model::{
 
 pub mod circuit;
 pub use circuit::{
-    CircuitDevice, CircuitDiagnostics, CircuitModel, CircuitNode, CircuitOperatingPoint,
-    CircuitSource, CircuitWaveform,
+    CircuitDcContinuationOptions, CircuitDevice, CircuitDiagnostics, CircuitModel, CircuitNode,
+    CircuitOperatingPoint, CircuitSource, CircuitWaveform,
 };
 
 pub mod scaling;
