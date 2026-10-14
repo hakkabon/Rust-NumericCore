@@ -156,6 +156,13 @@ pub use nonlinear_equations::{continue_solution, solve_equation_model, solve_new
     NonlinearSystemIteration, NonlinearSystemOptions, NonlinearSystemResult,
     NonlinearSystemTermination, PseudoTransientOptions};
 
+pub mod time_integration;
+pub use time_integration::{
+    integrate_dae, integrate_dae_with_observer, integrate_ode, integrate_ode_with_events,
+    DaeEvaluation, EventDirection, TimeEvent, TimeIntegrationIteration,
+    TimeIntegrationOptions, TimeIntegrationResult, TimeIntegrationTermination, TimePoint,
+};
+
 pub mod scaling;
 pub use scaling::{ScaledProblem, ScaledSolver, ScalingOptions, ScalingReport};
 

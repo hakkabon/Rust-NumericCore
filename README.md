@@ -128,6 +128,10 @@ Phase 38 adds reusable sparse symbolic analysis and numerical refactorization,
 deterministic minimum-degree ordering, pivoted sparse LU, symmetric-indefinite
 LDLT with 1-by-1/2-by-2 pivots and inertia, multiple right-hand sides,
 iterative refinement, backward error, and fill/pivot/growth diagnostics.
+Phase 39 adds adaptive Dormand-Prince ODE integration, cubic Hermite dense
+output, directional event location, and adaptive backward-Euler integration
+for residual-form index-1 DAEs and singular mass matrices, with analytic
+Jacobian blocks and explicit step/Newton diagnostics.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's
