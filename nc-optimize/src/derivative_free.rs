@@ -243,6 +243,362 @@ pub struct PatternSearchResult {
     pub termination: DerivativeFreeTermination,
 }
 
+/// Options for bound-constrained quadratic-model trust-region optimization.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelBasedOptions {
+    pub max_iterations: usize,
+    pub max_evaluations: usize,
+    pub initial_radius: f64,
+    pub final_radius: f64,
+    pub maximum_radius: f64,
+    pub acceptance_threshold: f64,
+    pub contraction: f64,
+    pub expansion: f64,
+    pub objective_tolerance: f64,
+}
+impl Default for ModelBasedOptions {
+    fn default() -> Self {
+        Self {
+            max_iterations: 1_000,
+            max_evaluations: 20_000,
+            initial_radius: 1.0,
+            final_radius: 1e-7,
+            maximum_radius: 100.0,
+            acceptance_threshold: 0.1,
+            contraction: 0.5,
+            expansion: 2.0,
+            objective_tolerance: 1e-12,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelBasedResult {
+    pub point: Vec<f64>,
+    pub objective: f64,
+    pub iterations: usize,
+    pub evaluations: usize,
+    pub model_builds: usize,
+    pub accepted_steps: usize,
+    pub one_sided_stencils: usize,
+    pub final_radius: f64,
+    pub final_projected_gradient_norm: f64,
+    pub last_reduction_ratio: f64,
+    pub termination: DerivativeFreeTermination,
+}
+
+/// Minimizes a value-only objective with local diagonal-quadratic interpolation models.
+pub fn minimize_model_based<F>(
+    initial: &[f64],
+    bounds: Option<&[Bound]>,
+    options: ModelBasedOptions,
+    evaluate: F,
+) -> Result<ModelBasedResult, OptimizeError>
+where
+    F: FnMut(&[f64]) -> Result<f64, OptimizeError>,
+{
+    minimize_model_based_with_observer(initial, bounds, options, evaluate, |_| true)
+}
+
+pub fn minimize_model_based_with_observer<F, O>(
+    initial: &[f64],
+    bounds: Option<&[Bound]>,
+    options: ModelBasedOptions,
+    mut evaluate: F,
+    mut observer: O,
+) -> Result<ModelBasedResult, OptimizeError>
+where
+    F: FnMut(&[f64]) -> Result<f64, OptimizeError>,
+    O: FnMut(&DerivativeFreeIteration) -> bool,
+{
+    validate_model_based(initial, bounds, options)?;
+    let box_bounds = owned_bounds(initial.len(), bounds);
+    let mut point = project(initial, &box_bounds);
+    let mut value = checked(&mut evaluate, &point)?;
+    let mut evaluations = 1;
+    let mut radius = options.initial_radius.min(options.maximum_radius);
+    let mut model_builds = 0;
+    let mut accepted_steps = 0;
+    let mut one_sided_stencils = 0;
+    let mut projected_gradient_norm = f64::INFINITY;
+    let mut last_ratio = f64::NAN;
+
+    for iteration in 0..options.max_iterations {
+        if radius <= options.final_radius {
+            return Ok(model_based_result(
+                point,
+                value,
+                iteration,
+                evaluations,
+                model_builds,
+                accepted_steps,
+                one_sided_stencils,
+                radius,
+                projected_gradient_norm,
+                last_ratio,
+                DerivativeFreeTermination::Converged,
+            ));
+        }
+        if evaluations + 2 * point.len() + 1 > options.max_evaluations {
+            return Ok(model_based_result(
+                point,
+                value,
+                iteration,
+                evaluations,
+                model_builds,
+                accepted_steps,
+                one_sided_stencils,
+                radius,
+                projected_gradient_norm,
+                last_ratio,
+                DerivativeFreeTermination::EvaluationLimit,
+            ));
+        }
+        if !observer(&DerivativeFreeIteration {
+            iteration,
+            point: point.clone(),
+            objective: value,
+            evaluations,
+            size: radius,
+        }) {
+            return Ok(model_based_result(
+                point,
+                value,
+                iteration,
+                evaluations,
+                model_builds,
+                accepted_steps,
+                one_sided_stencils,
+                radius,
+                projected_gradient_norm,
+                last_ratio,
+                DerivativeFreeTermination::Cancelled,
+            ));
+        }
+
+        let (gradient, curvature, used_one_sided) = interpolation_model(
+            &point,
+            value,
+            radius,
+            &box_bounds,
+            &mut evaluate,
+            &mut evaluations,
+        )?;
+        model_builds += 1;
+        one_sided_stencils += used_one_sided;
+        projected_gradient_norm = projected_gradient(&point, &gradient, &box_bounds)
+            .iter()
+            .map(|v| v * v)
+            .sum::<f64>()
+            .sqrt();
+        let step = model_step(&point, &gradient, &curvature, radius, &box_bounds);
+        let step_norm = step.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if step_norm <= options.final_radius * 0.1 {
+            radius *= options.contraction;
+            continue;
+        }
+        let predicted = -gradient
+            .iter()
+            .zip(&curvature)
+            .zip(&step)
+            .map(|((g, h), s)| g * s + 0.5 * h * s * s)
+            .sum::<f64>();
+        if !predicted.is_finite() || predicted <= 0. {
+            radius *= options.contraction;
+            continue;
+        }
+        let candidate = project(
+            &point
+                .iter()
+                .zip(&step)
+                .map(|(x, s)| x + s)
+                .collect::<Vec<_>>(),
+            &box_bounds,
+        );
+        let candidate_value = checked(&mut evaluate, &candidate)?;
+        evaluations += 1;
+        let actual = value - candidate_value;
+        last_ratio = actual / predicted;
+        let accepted =
+            last_ratio >= options.acceptance_threshold && actual > options.objective_tolerance;
+        if accepted {
+            point = candidate;
+            value = candidate_value;
+            accepted_steps += 1;
+        }
+        if !accepted || last_ratio < 0.1 {
+            radius *= options.contraction;
+        } else if last_ratio > 0.75 && step_norm >= 0.8 * radius {
+            radius = (options.expansion * radius).min(options.maximum_radius);
+        }
+    }
+    Ok(model_based_result(
+        point,
+        value,
+        options.max_iterations,
+        evaluations,
+        model_builds,
+        accepted_steps,
+        one_sided_stencils,
+        radius,
+        projected_gradient_norm,
+        last_ratio,
+        DerivativeFreeTermination::IterationLimit,
+    ))
+}
+
+fn interpolation_model<F>(
+    point: &[f64],
+    center_value: f64,
+    radius: f64,
+    bounds: &[Bound],
+    evaluate: &mut F,
+    evaluations: &mut usize,
+) -> Result<(Vec<f64>, Vec<f64>, usize), OptimizeError>
+where
+    F: FnMut(&[f64]) -> Result<f64, OptimizeError>,
+{
+    let mut gradient = vec![0.; point.len()];
+    let mut curvature = vec![0.; point.len()];
+    let mut one_sided = 0;
+    for i in 0..point.len() {
+        let plus = radius.min(bounds[i].upper.unwrap_or(f64::INFINITY) - point[i]);
+        let minus = radius.min(point[i] - bounds[i].lower.unwrap_or(f64::NEG_INFINITY));
+        if plus > 1e-14 && minus > 1e-14 {
+            let mut xp = point.to_vec();
+            xp[i] += plus;
+            let fp = checked(evaluate, &xp)?;
+            let mut xm = point.to_vec();
+            xm[i] -= minus;
+            let fm = checked(evaluate, &xm)?;
+            *evaluations += 2;
+            curvature[i] =
+                2. * ((fp - center_value) / plus + (fm - center_value) / minus) / (plus + minus);
+            gradient[i] = (fp - center_value) / plus - 0.5 * curvature[i] * plus;
+        } else {
+            one_sided += 1;
+            let direction = if plus > 1e-14 { 1. } else { -1. };
+            let available = if direction > 0. { plus } else { minus };
+            let h = available.max(1e-14);
+            let half = 0.5 * h;
+            let mut x1 = point.to_vec();
+            x1[i] += direction * h;
+            let f1 = checked(evaluate, &x1)?;
+            let mut x2 = point.to_vec();
+            x2[i] += direction * half;
+            let f2 = checked(evaluate, &x2)?;
+            *evaluations += 2;
+            let signed_h = direction * h;
+            curvature[i] = (f1 - 2. * f2 + center_value) / (half * half);
+            gradient[i] = (f1 - center_value - 0.5 * curvature[i] * h * h) / signed_h;
+        }
+    }
+    Ok((gradient, curvature, one_sided))
+}
+
+fn projected_gradient(point: &[f64], gradient: &[f64], bounds: &[Bound]) -> Vec<f64> {
+    point
+        .iter()
+        .zip(gradient)
+        .zip(bounds)
+        .map(|((x, g), b)| {
+            if (*x <= b.lower.unwrap_or(f64::NEG_INFINITY) + 1e-12 && *g > 0.)
+                || (*x >= b.upper.unwrap_or(f64::INFINITY) - 1e-12 && *g < 0.)
+            {
+                0.
+            } else {
+                *g
+            }
+        })
+        .collect()
+}
+
+fn model_step(
+    point: &[f64],
+    gradient: &[f64],
+    curvature: &[f64],
+    radius: f64,
+    bounds: &[Bound],
+) -> Vec<f64> {
+    let mut step = gradient
+        .iter()
+        .zip(curvature)
+        .enumerate()
+        .map(|(i, (g, h))| {
+            let raw = if *h > 1e-12 {
+                -g / h
+            } else if *g > 0. {
+                -radius
+            } else if *g < 0. {
+                radius
+            } else {
+                0.
+            };
+            raw.max(bounds[i].lower.unwrap_or(f64::NEG_INFINITY) - point[i])
+                .min(bounds[i].upper.unwrap_or(f64::INFINITY) - point[i])
+        })
+        .collect::<Vec<_>>();
+    let norm = step.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if norm > radius {
+        for value in &mut step {
+            *value *= radius / norm;
+        }
+    }
+    let predicted = -gradient
+        .iter()
+        .zip(curvature)
+        .zip(&step)
+        .map(|((g, h), s)| g * s + 0.5 * h * s * s)
+        .sum::<f64>();
+    if predicted <= 0. || !predicted.is_finite() {
+        step = projected_gradient(point, gradient, bounds)
+            .iter()
+            .map(|g| -g)
+            .collect();
+        let norm = step.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if norm > radius {
+            for value in &mut step {
+                *value *= radius / norm;
+            }
+        }
+        for i in 0..step.len() {
+            step[i] = step[i]
+                .max(bounds[i].lower.unwrap_or(f64::NEG_INFINITY) - point[i])
+                .min(bounds[i].upper.unwrap_or(f64::INFINITY) - point[i]);
+        }
+    }
+    step
+}
+
+#[allow(clippy::too_many_arguments)]
+fn model_based_result(
+    point: Vec<f64>,
+    objective: f64,
+    iterations: usize,
+    evaluations: usize,
+    model_builds: usize,
+    accepted_steps: usize,
+    one_sided_stencils: usize,
+    final_radius: f64,
+    final_projected_gradient_norm: f64,
+    last_reduction_ratio: f64,
+    termination: DerivativeFreeTermination,
+) -> ModelBasedResult {
+    ModelBasedResult {
+        point,
+        objective,
+        iterations,
+        evaluations,
+        model_builds,
+        accepted_steps,
+        one_sided_stencils,
+        final_radius,
+        final_projected_gradient_norm,
+        last_reduction_ratio,
+        termination,
+    }
+}
+
 pub fn minimize_pattern_search<F>(
     initial: &[f64],
     bounds: Option<&[Bound]>,
@@ -395,6 +751,38 @@ fn validate_pattern(
         || o.objective_tolerance < 0.0
     {
         Err(invalid("invalid pattern-search options"))
+    } else {
+        Ok(())
+    }
+}
+fn validate_model_based(
+    x: &[f64],
+    bounds: Option<&[Bound]>,
+    o: ModelBasedOptions,
+) -> Result<(), OptimizeError> {
+    validate_problem(x, bounds)?;
+    if o.max_iterations == 0
+        || o.max_evaluations < 2 * x.len() + 2
+        || !positive(o.initial_radius)
+        || !positive(o.final_radius)
+        || o.final_radius >= o.initial_radius
+        || !positive(o.maximum_radius)
+        || o.maximum_radius < o.initial_radius
+        || !(0.0..1.0).contains(&o.acceptance_threshold)
+        || !(0.0..1.0).contains(&o.contraction)
+        || !o.expansion.is_finite()
+        || o.expansion <= 1.
+        || !o.objective_tolerance.is_finite()
+        || o.objective_tolerance < 0.
+        || bounds.is_some_and(|values| {
+            values
+                .iter()
+                .any(|b| b.lower.is_some() && b.lower == b.upper)
+        })
+    {
+        Err(invalid(
+            "invalid model-based derivative-free options or fixed bounds",
+        ))
     } else {
         Ok(())
     }
@@ -598,5 +986,49 @@ mod tests {
             minimize_nelder_mead(&[0.0], None, NelderMeadOptions::default(), |_| Ok(f64::NAN))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn model_based_trust_region_solves_rotated_bounded_quadratic() {
+        let bounds = [
+            Bound {
+                lower: Some(-2.),
+                upper: Some(4.),
+            },
+            Bound {
+                lower: Some(-3.),
+                upper: Some(3.),
+            },
+        ];
+        let result = minimize_model_based(
+            &[-2., 3.],
+            Some(&bounds),
+            ModelBasedOptions::default(),
+            |x| {
+                let a = x[0] - 1.;
+                let b = x[1] + 0.5;
+                Ok(2. * a * a + 1.5 * a * b + 3. * b * b)
+            },
+        )
+        .unwrap();
+        assert_eq!(result.termination, DerivativeFreeTermination::Converged);
+        assert!((result.point[0] - 1.).abs() < 2e-4);
+        assert!((result.point[1] + 0.5).abs() < 2e-4);
+        assert!(result.objective < 1e-7 && result.accepted_steps > 0 && result.model_builds > 0);
+    }
+
+    #[test]
+    fn model_based_uses_one_sided_geometry_at_a_bound() {
+        let bounds = [Bound {
+            lower: Some(0.),
+            upper: Some(4.),
+        }];
+        let result =
+            minimize_model_based(&[0.], Some(&bounds), ModelBasedOptions::default(), |x| {
+                Ok((x[0] - 2.).powi(2))
+            })
+            .unwrap();
+        assert!((result.point[0] - 2.).abs() < 1e-5);
+        assert!(result.one_sided_stencils > 0);
     }
 }

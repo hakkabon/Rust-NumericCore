@@ -155,6 +155,9 @@ diagnostics.
 Phase 45 adds consistent structural mass assembly, constrained mass-normalized
 modal analysis, Rayleigh damping, and average-acceleration Newmark transient
 integration with energy and equilibrium diagnostics.
+Phase 46 adds bound-constrained model-based derivative-free optimization using
+local quadratic interpolation stencils, trust-region ratio/radius control,
+one-sided boundary geometry, and explicit model/evaluation diagnostics.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

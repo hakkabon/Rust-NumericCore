@@ -143,9 +143,11 @@ pub use advanced_nonlinear::{minimize_newton_cg, minimize_powell, NewtonCgOption
 
 pub mod derivative_free;
 pub use derivative_free::{minimize_nelder_mead, minimize_nelder_mead_with_observer,
-    minimize_pattern_search, minimize_pattern_search_with_observer,
+    minimize_model_based, minimize_model_based_with_observer, minimize_pattern_search,
+    minimize_pattern_search_with_observer,
     DerivativeFreeIteration, DerivativeFreeTermination, NelderMeadOptions,
-    NelderMeadResult, PatternSearchOptions, PatternSearchResult};
+    NelderMeadResult, ModelBasedOptions, ModelBasedResult, PatternSearchOptions,
+    PatternSearchResult};
 
 pub mod nonlinear_equations;
 pub use nonlinear_equations::{continue_solution, solve_equation_model, solve_newton_krylov,
