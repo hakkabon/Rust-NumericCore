@@ -179,6 +179,12 @@ pub use circuit_ac::{
     optimize_circuit_ac, CircuitAcExcitation, CircuitAcPoint, CircuitAcSweep, CircuitAcTarget,
     CircuitComplex, CircuitDesignVariable, CircuitOptimizationOptions, CircuitOptimizationResult,
 };
+pub mod fem;
+pub use fem::{
+    FemConstraint, FemNodalLoad, FemNode2D, FemStaticResult, ThermalFemModel, ThermalMaterial,
+    ThermalTriangle3, TrussElement2D, TrussElementResult, TrussFemModel, TrussMaterial,
+    TrussStaticResult,
+};
 
 pub mod scaling;
 pub use scaling::{ScaledProblem, ScaledSolver, ScalingOptions, ScalingReport};

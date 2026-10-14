@@ -148,6 +148,10 @@ Phase 43 adds small-signal AC sweeps by linearizing the nonlinear MNA system at
 a DC operating point and solving its real block complex form. It also adds
 bounded response-driven circuit optimization with finite-difference design
 sensitivities and reusable L-BFGS-B convergence diagnostics.
+Phase 44 establishes finite-element analysis with sparse global assembly,
+Dirichlet elimination, reaction recovery, constant-gradient thermal triangles,
+and planar truss elements with strain, stress, force, energy, and residual
+diagnostics.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's
