@@ -124,6 +124,10 @@ diagnostics for value-only and nonsmooth objectives.
 Phase 37 adds first-class square nonlinear equation systems with damped Newton,
 matrix-free Newton-GMRES, scaling, Jacobian reuse, adaptive parameter
 continuation, and pseudo-transient continuation.
+Phase 38 adds reusable sparse symbolic analysis and numerical refactorization,
+deterministic minimum-degree ordering, pivoted sparse LU, symmetric-indefinite
+LDLT with 1-by-1/2-by-2 pivots and inertia, multiple right-hand sides,
+iterative refinement, backward error, and fill/pivot/growth diagnostics.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

@@ -16,9 +16,15 @@ use thiserror::Error;
 use std::collections::BTreeMap;
 
 mod direct;
+mod factorization;
 pub use direct::{
     IncompleteCholesky, Ilu0, SparseCholesky, SparseDirectError,
     SparseDirectReport, SparseLu,
+};
+pub use factorization::{
+    SparseFactorizationDiagnostics, SparseInertia, SparseLdlt,
+    SparseLuFactorization, SparseNumericOptions, SparseOrdering,
+    SparseRefinedReport, SparseSymbolicAnalysis,
 };
 
 #[derive(Debug, Error)]

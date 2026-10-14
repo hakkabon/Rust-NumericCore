@@ -18,6 +18,10 @@ pub enum SparseDirectError {
     NotPositiveDefinite { pivot: usize },
     #[error("drop tolerance must be finite and non-negative")]
     InvalidDropTolerance,
+    #[error("matrix sparsity pattern does not match the symbolic analysis")]
+    PatternMismatch,
+    #[error("factorization options must be finite and non-negative")]
+    InvalidOptions,
 }
 
 #[derive(Debug, Clone, PartialEq)]
