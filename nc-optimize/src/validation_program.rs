@@ -5,7 +5,9 @@ use crate::{
     OptimizeError, PresolveOptions, Problem, QuadraticOptions, QuadraticProblem,
     RevisedSimplexSolver, ScaledSolver, ScalingOptions, Solver, SparseLinearWorkspace,
 };
-use crate::{ValidationCase, ValidationMetric, ValidationReport, ValidationTolerance};
+use crate::{
+    ValidationCase, ValidationMetric, ValidationReport, ValidationTier, ValidationTolerance,
+};
 use nc_sparse::CsrMatrix;
 
 /// Run small, hand-checkable LP, QP, MILP, and nonlinear cases. The returned
@@ -63,6 +65,11 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
                 tight,
             ),
         ],
+    )
+    .classified(
+        "internal.lp.reference",
+        "linear-programming",
+        ValidationTier::Smoke,
     );
 
     let qp = QuadraticProblem {
@@ -95,6 +102,11 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
                 ValidationTolerance::new(1e-5, 0.0),
             ),
         ],
+    )
+    .classified(
+        "internal.qp.kkt",
+        "quadratic-programming",
+        ValidationTier::Smoke,
     );
 
     let milp = Problem {
@@ -137,6 +149,11 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
                 tight,
             ),
         ],
+    )
+    .classified(
+        "internal.milp.enumerated",
+        "mixed-integer-programming",
+        ValidationTier::Smoke,
     );
 
     let nonlinear = minimize_lbfgs(&[8.0, -8.0], LbfgsOptions::default(), |point| {
@@ -156,6 +173,11 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
                 ValidationTolerance::new(1e-7, 0.0),
             ),
         ],
+    )
+    .classified(
+        "internal.nlp.stationary",
+        "nonlinear-optimization",
+        ValidationTier::Smoke,
     );
 
     let transform_problem = Problem {
@@ -197,6 +219,11 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
                 ValidationTolerance::new(0.0, 0.0),
             ),
         ],
+    )
+    .classified(
+        "internal.presolve.postsolve",
+        "model-transformation",
+        ValidationTier::Standard,
     );
 
     let sparse_problem = Problem {
@@ -223,6 +250,11 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
             ValidationMetric::compare("transpose column 0", transpose[0], 6.00000001, tight),
             ValidationMetric::compare("transpose column 2", transpose[2], -1.0, tight),
         ],
+    )
+    .classified(
+        "internal.sparse.mixed-scale",
+        "sparse-linear-algebra",
+        ValidationTier::Standard,
     );
 
     let first = crate::deterministic_perturbation(&[1.0, -2.0, 3.0], 42, 1e-6);
@@ -242,6 +274,11 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
                 )
             })
             .collect(),
+    )
+    .classified(
+        "internal.reproducibility.perturbation",
+        "validation-infrastructure",
+        ValidationTier::Standard,
     );
 
     let mut cases = vec![
@@ -268,5 +305,14 @@ mod tests {
         assert_eq!(report.cases.len(), 9);
         assert_eq!(report.failure_count(), 0);
         assert!(report.maximum_normalized_error() <= 1.0);
+        assert_eq!(report.for_tier(ValidationTier::Smoke).cases.len(), 4);
+        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 9);
+
+        let first = report.snapshot("rust", ValidationTier::Standard);
+        let second = run_reference_validation()
+            .unwrap()
+            .snapshot("rust", ValidationTier::Standard);
+        assert_eq!(first.to_json_pretty(), second.to_json_pretty());
+        assert!(second.regressions_against(&first, 0.0).is_empty());
     }
 }

@@ -4,7 +4,7 @@ use crate::{
     minimize_sqp, solve_model_least_squares, Bound, ConstrainedNonlinearProblem,
     NonlinearConstraint, NonlinearExpression, NonlinearLeastSquaresOptions, NonlinearModel,
     NonlinearNode::*, OptimizeError, RobustLoss, SqpOptions, ValidationCase, ValidationMetric,
-    ValidationProvenance, ValidationTolerance,
+    ValidationProvenance, ValidationTier, ValidationTolerance,
 };
 
 pub fn run_external_reference_validation() -> Result<Vec<ValidationCase>, OptimizeError> {
@@ -87,6 +87,11 @@ fn nist_misra1a() -> Result<ValidationCase, OptimizeError> {
             source_url: "https://www.itl.nist.gov/div898/strd/nls/data/LINKS/DATA/Misra1a.dat"
                 .into(),
         },
+    )
+    .classified(
+        "nist.strd.misra1a",
+        "nonlinear-least-squares",
+        ValidationTier::Standard,
     ))
 }
 
@@ -189,7 +194,8 @@ fn cutest_hs71() -> Result<ValidationCase, OptimizeError> {
     Ok(ValidationCase::external("CUTEst HS71 constrained nonlinear program", metrics,
         ValidationProvenance { collection: "CUTEst SIF problem set".into(), problem: "HS71".into(),
             citation: "Hock and Schittkowski (1981), Test Examples for Nonlinear Programming Codes, problem 71".into(),
-            source_url: "https://github.com/ralna/SIF/blob/master/HS71.SIF".into() }))
+            source_url: "https://github.com/ralna/SIF/blob/master/HS71.SIF".into() })
+        .classified("cutest.hs71", "constrained-nonlinear", ValidationTier::Standard))
 }
 
 #[cfg(test)]

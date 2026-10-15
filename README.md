@@ -170,6 +170,11 @@ solutions, with implicit first-order primal and multiplier sensitivities to
 objective-gradient, nonlinear-bound, and variable-bound perturbations.
 Phase 50 adds provenance-tagged external validation using NIST StRD Misra1a and
 CUTEst HS71, integrated into the offline deterministic release-gating report.
+Phase 51 turns those checks into a tiered reproducibility corpus with stable
+case identifiers, solver-family manifests, deterministic JSON snapshots,
+baseline-regression detection, and uploaded CI evidence. Run
+`cargo run -p nc-optimize --example numerical_validation -- standard` to
+produce the standard-tier artifact locally.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

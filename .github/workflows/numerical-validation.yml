@@ -21,3 +21,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Run complete validation suite
         run: cargo test --workspace
+      - name: Produce reproducible standard-tier evidence
+        run: cargo run -p nc-optimize --example numerical_validation -- standard > target/numerical-validation.json
+      - name: Upload numerical evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-numerical-validation
+          path: target/numerical-validation.json

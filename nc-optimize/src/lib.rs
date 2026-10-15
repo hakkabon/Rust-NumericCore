@@ -216,7 +216,9 @@ pub use validation_program::run_reference_validation;
 
 pub mod validation;
 pub use validation::{deterministic_perturbation, validate_linear_system, LinearSystemValidation,
-    ValidationCase, ValidationMetric, ValidationProvenance, ValidationReport, ValidationTolerance};
+    ValidationCase, ValidationManifestEntry, ValidationMetric, ValidationProvenance,
+    ValidationRegression, ValidationReport, ValidationSnapshot, ValidationTier,
+    ValidationTolerance};
 
 pub mod external_validation;
 pub use external_validation::run_external_reference_validation;
