@@ -184,6 +184,11 @@ auditable metrics. LP/MILP results are checked for original-model feasibility
 and integrality and require a supplied global gap for optimality; convex QPs
 receive full primal/KKT/complementarity verification and active-set rank
 warnings. Invalid or non-finite evidence fails closed.
+Phase 54 adds a source-located SPICE netlist compiler for a practical R/C/L,
+independent/controlled-source, diode, and level-1 NMOS subset. Parameters,
+initial conditions, transient source waveforms, and DC/transient/AC directives
+lower into the native typed circuit kernel; standard validation parses and
+executes an RC DC/AC case end to end.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

@@ -202,6 +202,9 @@ pub use circuit_ac::{
     optimize_circuit_ac, CircuitAcExcitation, CircuitAcPoint, CircuitAcSweep, CircuitAcTarget,
     CircuitComplex, CircuitDesignVariable, CircuitOptimizationOptions, CircuitOptimizationResult,
 };
+pub mod spice;
+pub use spice::{parse_spice_netlist, ParsedSpiceNetlist, SpiceAcAnalysis, SpiceAcScale,
+    SpiceAnalysis, SpiceDiagnostic, SpiceNetlistError};
 pub mod fem;
 pub use fem::{
     FemConstraint, FemDynamicOptions, FemDynamicResult, FemDynamicState, FemModalResult,
