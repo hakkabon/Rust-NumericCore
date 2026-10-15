@@ -129,6 +129,9 @@ pub use quadratic_program::{
     QuadraticTermination, QuadraticWarmStart,
 };
 
+pub mod quadratic_polish;
+pub use quadratic_polish::{polish_convex_qp, QuadraticPolishResult};
+
 pub mod sparse_optimization;
 pub use sparse_optimization::{solve_sparse_convex_qp, SparseLinearWorkspace,
     SparseQuadraticProblem, SparseSymmetricMatrix};
@@ -136,6 +139,10 @@ pub use sparse_optimization::{solve_sparse_convex_qp, SparseLinearWorkspace,
 pub mod model_presolve;
 pub use model_presolve::{presolve_problem, PresolveOptions, PresolveReport, PresolveStatus,
     PresolvedProblem};
+
+pub mod production_linear;
+pub use production_linear::{solve_production_linear, ProductionLinearMethod,
+    ProductionLinearOptions, ProductionLinearResult};
 
 pub mod advanced_nonlinear;
 pub use advanced_nonlinear::{minimize_newton_cg, minimize_powell, NewtonCgOptions,

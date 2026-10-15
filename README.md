@@ -161,6 +161,10 @@ one-sided boundary geometry, and explicit model/evaluation diagnostics.
 Phase 47 adds joint affine interpolation of value-only objectives and nonlinear
 equalities/inequalities, adaptive exact-penalty restoration, tangential steps,
 and distinct feasible versus infeasible-stationary termination.
+Phase 48 adds an audited production LP/MILP facade that composes reversible
+presolve, automatic backend selection, scaling, postsolve reconstruction, and
+independent original-model certification. Convex QP solutions gain guarded
+active-set polishing through a pivoted equality-constrained KKT solve.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's
