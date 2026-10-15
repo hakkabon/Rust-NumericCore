@@ -5,7 +5,9 @@ use crate::{
     OptimizeError, PresolveOptions, Problem, QuadraticOptions, QuadraticProblem,
     RevisedSimplexSolver, ScaledSolver, ScalingOptions, Solver, SparseLinearWorkspace,
     SparseHessian, SparseJacobian, SparseKktProblem, SparseKktWorkspace,
-    certify_convex_qp, parse_spice_netlist, CertificateClaim, CertificateTolerance, SpiceAnalysis,
+    certify_convex_qp, consistent_dae_initial_conditions, integrate_dae_with_events,
+    parse_spice_netlist, CertificateClaim, CertificateTolerance, DaeEvaluation, EventDirection,
+    SpiceAnalysis, TimeIntegrationOptions,
 };
 use crate::{
     ValidationCase, ValidationMetric, ValidationReport, ValidationTier, ValidationTolerance,
@@ -318,6 +320,29 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
     ]).classified("internal.circuit.spice-netlist", "circuit-analysis",
         ValidationTier::Standard);
 
+    let dae_system = |_: f64, y: &[f64], yd: &[f64]| Ok(DaeEvaluation::from_mass_matrix(
+        vec![vec![1.0, 0.0], vec![0.0, 0.0]], &[-y[0], 1.0-y[0]-y[1]],
+        &[vec![-1.0, 0.0], vec![-1.0, -1.0]], yd));
+    let dae_initial = consistent_dae_initial_conditions(
+        0.0, &[1.0, 0.5], &[0.0, 0.0], &[false, true], 12, 1e-10, dae_system)?;
+    let dae_options = TimeIntegrationOptions { absolute_tolerance: 1e-5,
+        relative_tolerance: 1e-4, initial_step: 0.02, maximum_step: 0.05,
+        ..Default::default() };
+    let dae_result = integrate_dae_with_events(0.0, 2.0, &dae_initial.state,
+        &dae_initial.derivative, dae_options, dae_system, &[0.3],
+        &[EventDirection::Falling], &[true], |_, y| Ok(vec![y[0]-0.5]), |_| true)?;
+    let dae_case = ValidationCase::new(
+        "consistent index-1 DAE initialization and event integration", vec![
+        ValidationMetric::compare("DAE initialization residual", dae_initial.residual_norm,
+            0.0, ValidationTolerance::new(1e-10, 0.0)),
+        ValidationMetric::compare("DAE terminal event time",
+            dae_result.events.first().map_or(f64::INFINITY, |event| event.time),
+            2.0_f64.ln(), ValidationTolerance::new(3e-3, 0.0)),
+        ValidationMetric::compare("DAE hard stop observed",
+            if dae_result.points.iter().any(|point| (point.time-0.3).abs() < 1e-14) { 1.0 } else { 0.0 },
+            1.0, ValidationTolerance::new(0.0, 0.0)),
+    ]).classified("internal.dae.production", "time-integration", ValidationTier::Standard);
+
     let first = crate::deterministic_perturbation(&[1.0, -2.0, 3.0], 42, 1e-6);
     let second = crate::deterministic_perturbation(&[1.0, -2.0, 3.0], 42, 1e-6);
     let perturbation_case = ValidationCase::new(
@@ -352,6 +377,7 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
         sparse_case,
         kkt_case,
         spice_case,
+        dae_case,
         perturbation_case,
     ];
     cases.extend(crate::run_external_reference_validation()?);
@@ -366,11 +392,11 @@ mod tests {
     fn production_reference_program_passes() {
         let report = run_reference_validation().unwrap();
         assert!(report.passed(), "{report:#?}");
-        assert_eq!(report.cases.len(), 12);
+        assert_eq!(report.cases.len(), 13);
         assert_eq!(report.failure_count(), 0);
         assert!(report.maximum_normalized_error() <= 1.0);
         assert_eq!(report.for_tier(ValidationTier::Smoke).cases.len(), 4);
-        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 12);
+        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 13);
 
         let first = report.snapshot("rust", ValidationTier::Standard);
         let second = run_reference_validation()

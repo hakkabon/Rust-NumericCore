@@ -181,8 +181,9 @@ pub use nonlinear_equations::{continue_solution, solve_equation_model, solve_new
 
 pub mod time_integration;
 pub use time_integration::{
-    integrate_dae, integrate_dae_with_observer, integrate_ode, integrate_ode_with_events,
-    DaeEvaluation, EventDirection, TimeEvent, TimeIntegrationIteration,
+    consistent_dae_initial_conditions, integrate_dae, integrate_dae_with_events,
+    integrate_dae_with_observer, integrate_ode, integrate_ode_with_events, DaeEvaluation,
+    DaeInitializationResult, EventDirection, TimeEvent, TimeIntegrationIteration,
     TimeIntegrationOptions, TimeIntegrationResult, TimeIntegrationTermination, TimePoint,
 };
 

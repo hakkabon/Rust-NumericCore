@@ -189,6 +189,10 @@ independent/controlled-source, diode, and level-1 NMOS subset. Parameters,
 initial conditions, transient source waveforms, and DC/transient/AC directives
 lower into the native typed circuit kernel; standard validation parses and
 executes an RC DC/AC case end to end.
+Phase 55 adds Jacobian-based consistent initialization for singular-mass
+index-1 DAEs, directional and terminal event location, and validated hard step
+stops. Circuit transients automatically feed source-waveform breakpoints to the
+implicit integrator so discontinuities are never crossed by one accepted step.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

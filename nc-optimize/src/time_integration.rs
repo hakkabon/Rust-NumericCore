@@ -118,6 +118,19 @@ pub struct DaeEvaluation {
     pub jacobian_derivative: Vec<Vec<f64>>,
 }
 
+/// Result of a consistent-initial-condition Newton solve. For every component
+/// the caller selects whether state or derivative may be corrected.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DaeInitializationResult {
+    pub state: Vec<f64>,
+    pub derivative: Vec<f64>,
+    pub iterations: usize,
+    pub evaluations: usize,
+    pub residual_norm: f64,
+    pub state_corrections: usize,
+    pub derivative_corrections: usize,
+}
+
 impl DaeEvaluation {
     /// Build `F = M*yDot - f(t,y)` and its two Jacobian blocks. `M` may be
     /// singular, which is the usual semi-explicit index-1 DAE case.
@@ -368,20 +381,148 @@ where
     )
 }
 
+/// Correct an index-1 DAE initial pair so `F(t, y, y_dot) = 0`. A `true`
+/// entry in `free_state` adjusts `y[j]`; `false` adjusts `y_dot[j]`. The
+/// selected columns of `F_y` and `F_yDot` form the square Newton matrix.
+pub fn consistent_dae_initial_conditions<F>(
+    time: f64,
+    initial_state: &[f64],
+    initial_derivative: &[f64],
+    free_state: &[bool],
+    max_iterations: usize,
+    tolerance: f64,
+    mut system: F,
+) -> Result<DaeInitializationResult, OptimizeError>
+where
+    F: FnMut(f64, &[f64], &[f64]) -> Result<DaeEvaluation, OptimizeError>,
+{
+    let n = initial_state.len();
+    if !time.is_finite()
+        || n == 0
+        || initial_derivative.len() != n
+        || free_state.len() != n
+        || initial_state
+            .iter()
+            .chain(initial_derivative)
+            .any(|value| !value.is_finite())
+        || max_iterations == 0
+        || !tolerance.is_finite()
+        || tolerance <= 0.0
+    {
+        return Err(invalid("invalid DAE initialization configuration"));
+    }
+    let mut state = initial_state.to_vec();
+    let mut derivative = initial_derivative.to_vec();
+    for iteration in 0..max_iterations {
+        let evaluation = checked_dae(system(time, &state, &derivative)?, n)?;
+        let residual_norm = inf_norm(&evaluation.residuals);
+        if residual_norm <= tolerance {
+            return Ok(DaeInitializationResult {
+                state,
+                derivative,
+                iterations: iteration,
+                evaluations: iteration + 1,
+                residual_norm,
+                state_corrections: free_state.iter().filter(|value| **value).count(),
+                derivative_corrections: free_state.iter().filter(|value| !**value).count(),
+            });
+        }
+        let matrix = (0..n)
+            .map(|row| {
+                (0..n)
+                    .map(|column| {
+                        if free_state[column] {
+                            evaluation.jacobian_state[row][column]
+                        } else {
+                            evaluation.jacobian_derivative[row][column]
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let Some(delta) = dense_solve(
+            matrix,
+            evaluation.residuals.iter().map(|value| -value).collect(),
+        ) else {
+            return Err(invalid(
+                "DAE initialization Jacobian is singular for the selected free variables",
+            ));
+        };
+        for column in 0..n {
+            if free_state[column] {
+                state[column] += delta[column];
+            } else {
+                derivative[column] += delta[column];
+            }
+        }
+        if state
+            .iter()
+            .chain(&derivative)
+            .any(|value| !value.is_finite())
+        {
+            return Err(invalid("DAE initialization produced non-finite values"));
+        }
+    }
+    Err(invalid("DAE consistent initialization did not converge"))
+}
+
 pub fn integrate_dae_with_observer<F, O>(
     start: f64,
     end: f64,
     initial_state: &[f64],
     initial_derivative: &[f64],
     options: TimeIntegrationOptions,
-    mut system: F,
-    mut observer: O,
+    system: F,
+    observer: O,
 ) -> Result<TimeIntegrationResult, OptimizeError>
 where
     F: FnMut(f64, &[f64], &[f64]) -> Result<DaeEvaluation, OptimizeError>,
     O: FnMut(&TimeIntegrationIteration) -> bool,
 {
+    integrate_dae_with_events(
+        start,
+        end,
+        initial_state,
+        initial_derivative,
+        options,
+        system,
+        &[],
+        &[],
+        &[],
+        |_, _| Ok(vec![]),
+        observer,
+    )
+}
+
+/// Adaptive residual-form DAE integration with directional event location.
+pub fn integrate_dae_with_events<F, E, O>(
+    start: f64,
+    end: f64,
+    initial_state: &[f64],
+    initial_derivative: &[f64],
+    options: TimeIntegrationOptions,
+    mut system: F,
+    stop_times: &[f64],
+    directions: &[EventDirection],
+    terminal: &[bool],
+    mut event: E,
+    mut observer: O,
+) -> Result<TimeIntegrationResult, OptimizeError>
+where
+    F: FnMut(f64, &[f64], &[f64]) -> Result<DaeEvaluation, OptimizeError>,
+    E: FnMut(f64, &[f64]) -> Result<Vec<f64>, OptimizeError>,
+    O: FnMut(&TimeIntegrationIteration) -> bool,
+{
     validate(start, end, initial_state, &options)?;
+    if directions.len() != terminal.len() {
+        return Err(invalid("event metadata lengths differ"));
+    }
+    if stop_times
+        .iter()
+        .any(|time| !time.is_finite() || *time < start.min(end) || *time > start.max(end))
+    {
+        return Err(invalid("invalid DAE stop time"));
+    }
     if initial_derivative.len() != initial_state.len()
         || initial_derivative.iter().any(|v| !v.is_finite())
     {
@@ -405,16 +546,31 @@ where
         state: state.clone(),
         derivative: derivative.clone(),
     }];
+    let mut previous_events = checked_events(event(time, &state)?, directions.len())?;
+    let mut events = vec![];
+    let mut stops = stop_times.to_vec();
+    stops.sort_by(|a, b| {
+        if direction > 0.0 {
+            a.total_cmp(b)
+        } else {
+            b.total_cmp(a)
+        }
+    });
+    stops.dedup_by(|a, b| (*a - *b).abs() <= f64::EPSILON * a.abs().max(b.abs()).max(1.0));
+    let mut stop_index = 0;
     let mut accepted = 0;
     let mut rejected = 0;
     let mut evaluations = 1;
     let mut jacobians = 1;
     let mut newton_total = 0;
     while !reached(time, end, direction) {
+        while stop_index < stops.len() && reached(time, stops[stop_index], direction) {
+            stop_index += 1;
+        }
         if accepted >= options.max_steps {
             return Ok(finish(
                 points,
-                vec![],
+                events,
                 accepted,
                 rejected,
                 evaluations,
@@ -424,10 +580,13 @@ where
             ));
         }
         step = direction * step.abs().min((end - time).abs()).min(options.maximum_step);
+        if stop_index < stops.len() {
+            step = direction * step.abs().min((stops[stop_index] - time).abs());
+        }
         if step.abs() < options.minimum_step || rejected > options.max_rejected_steps {
             return Ok(finish(
                 points,
-                vec![],
+                events,
                 accepted,
                 rejected,
                 evaluations,
@@ -461,7 +620,7 @@ where
             if step.abs() < options.minimum_step {
                 return Ok(finish(
                     points,
-                    vec![],
+                    events,
                     accepted,
                     rejected,
                     evaluations,
@@ -474,15 +633,62 @@ where
         }
         let error = scaled_error(&half2.state, &full.state, &state, &options);
         if error <= 1.0 {
-            time += step;
+            let next_time = time + step;
+            let next_events = checked_events(event(next_time, &half2.state)?, directions.len())?;
+            let next_point = TimePoint {
+                time: next_time,
+                state: half2.state.clone(),
+                derivative: half2.derivative.clone(),
+            };
+            let prior_point = points.last().unwrap().clone();
+            for index in 0..directions.len() {
+                if crossed(
+                    previous_events[index],
+                    next_events[index],
+                    directions[index],
+                ) {
+                    let (root_time, root_state, root_value) = locate_event(
+                        &prior_point,
+                        &next_point,
+                        index,
+                        previous_events[index],
+                        next_events[index],
+                        &mut event,
+                    )?;
+                    events.push(TimeEvent {
+                        index,
+                        time: root_time,
+                        state: root_state.clone(),
+                        value: root_value,
+                        terminal: terminal[index],
+                    });
+                    if terminal[index] {
+                        let root_derivative =
+                            hermite_derivative(&prior_point, &next_point, root_time);
+                        points.push(TimePoint {
+                            time: root_time,
+                            state: root_state,
+                            derivative: root_derivative,
+                        });
+                        return Ok(finish(
+                            points,
+                            events,
+                            accepted + 1,
+                            rejected,
+                            evaluations,
+                            jacobians,
+                            newton_total,
+                            TimeIntegrationTermination::TerminalEvent,
+                        ));
+                    }
+                }
+            }
+            time = next_time;
             state = half2.state;
             derivative = half2.derivative;
             accepted += 1;
-            points.push(TimePoint {
-                time,
-                state: state.clone(),
-                derivative: derivative.clone(),
-            });
+            points.push(next_point);
+            previous_events = next_events;
             if !observer(&TimeIntegrationIteration {
                 accepted_steps: accepted,
                 rejected_steps: rejected,
@@ -493,7 +699,7 @@ where
             }) {
                 return Ok(finish(
                     points,
-                    vec![],
+                    events,
                     accepted,
                     rejected,
                     evaluations,
@@ -510,7 +716,7 @@ where
     }
     Ok(finish(
         points,
-        vec![],
+        events,
         accepted,
         rejected,
         evaluations,
@@ -707,6 +913,22 @@ fn hermite(a: &TimePoint, b: &TimePoint, time: f64) -> Vec<f64> {
                 + h10 * h * a.derivative[i]
                 + h01 * b.state[i]
                 + h11 * h * b.derivative[i]
+        })
+        .collect()
+}
+fn hermite_derivative(a: &TimePoint, b: &TimePoint, time: f64) -> Vec<f64> {
+    let h = b.time - a.time;
+    if h == 0.0 {
+        return a.derivative.clone();
+    }
+    let s = (time - a.time) / h;
+    let dh00 = (6.0 * s * s - 6.0 * s) / h;
+    let dh10 = 3.0 * s * s - 4.0 * s + 1.0;
+    let dh01 = (-6.0 * s * s + 6.0 * s) / h;
+    let dh11 = 3.0 * s * s - 2.0 * s;
+    (0..a.state.len())
+        .map(|i| {
+            dh00 * a.state[i] + dh10 * a.derivative[i] + dh01 * b.state[i] + dh11 * b.derivative[i]
         })
         .collect()
 }
@@ -907,6 +1129,61 @@ mod tests {
             })
         });
         assert!(error.is_err());
+    }
+
+    #[test]
+    fn initializes_singular_dae_and_locates_terminal_event() {
+        let system = |_: f64, y: &[f64], yd: &[f64]| {
+            Ok(DaeEvaluation::from_mass_matrix(
+                vec![vec![1., 0.], vec![0., 0.]],
+                &[-y[0], 1. - y[0] - y[1]],
+                &[vec![-1., 0.], vec![-1., -1.]],
+                yd,
+            ))
+        };
+        let initialized = consistent_dae_initial_conditions(
+            0.,
+            &[1., 0.5],
+            &[0., 0.],
+            &[false, true],
+            8,
+            1e-12,
+            system,
+        )
+        .unwrap();
+        assert!((initialized.derivative[0] + 1.).abs() < 1e-12);
+        assert!(initialized.state[1].abs() < 1e-12);
+        let options = TimeIntegrationOptions {
+            initial_step: 0.02,
+            maximum_step: 0.05,
+            absolute_tolerance: 1e-5,
+            relative_tolerance: 1e-4,
+            ..Default::default()
+        };
+        let result = integrate_dae_with_events(
+            0.,
+            2.,
+            &initialized.state,
+            &initialized.derivative,
+            options,
+            system,
+            &[0.3],
+            &[EventDirection::Falling],
+            &[true],
+            |_, y| Ok(vec![y[0] - 0.5]),
+            |_| true,
+        )
+        .unwrap();
+        assert_eq!(
+            result.termination,
+            TimeIntegrationTermination::TerminalEvent
+        );
+        assert!((result.events[0].time - 2f64.ln()).abs() < 3e-3);
+        assert!((result.events[0].state[0] - 0.5).abs() < 1e-8);
+        assert!(result
+            .points
+            .iter()
+            .any(|point| (point.time - 0.3).abs() < 1e-14));
     }
 
     #[test]

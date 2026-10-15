@@ -1,7 +1,7 @@
 //! Modified nodal analysis for foundational circuit devices.
 
 use crate::{
-    integrate_dae, solve_nonlinear_system, DaeEvaluation, EngineeringAssembly,
+    solve_nonlinear_system, DaeEvaluation, EngineeringAssembly,
     NonlinearSystemEvaluation, NonlinearSystemOptions, NonlinearSystemTermination, OptimizeError,
     TimeIntegrationOptions, TimeIntegrationResult,
 };
@@ -576,13 +576,19 @@ impl CircuitModel {
         initial_derivative: &[f64],
         options: TimeIntegrationOptions,
     ) -> Result<TimeIntegrationResult, OptimizeError> {
-        integrate_dae(
+        let stop_times = self.transient_breakpoints(start, end)?;
+        crate::integrate_dae_with_events(
             start,
             end,
             initial_state,
             initial_derivative,
             options,
             |time, state, derivative| self.dae_evaluation(time, state, derivative),
+            &stop_times,
+            &[],
+            &[],
+            |_, _| Ok(vec![]),
+            |_| true,
         )
     }
 
