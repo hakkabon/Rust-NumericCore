@@ -165,6 +165,9 @@ Phase 48 adds an audited production LP/MILP facade that composes reversible
 presolve, automatic backend selection, scaling, postsolve reconstruction, and
 independent original-model certification. Convex QP solutions gain guarded
 active-set polishing through a pivoted equality-constrained KKT solve.
+Phase 49 adds equilibrated active-set KKT analysis for constrained nonlinear
+solutions, with implicit first-order primal and multiplier sensitivities to
+objective-gradient, nonlinear-bound, and variable-bound perturbations.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

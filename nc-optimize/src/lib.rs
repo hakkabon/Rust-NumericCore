@@ -132,6 +132,12 @@ pub use quadratic_program::{
 pub mod quadratic_polish;
 pub use quadratic_polish::{polish_convex_qp, QuadraticPolishResult};
 
+pub mod nonlinear_sensitivity;
+pub use nonlinear_sensitivity::{analyze_nonlinear_result_sensitivity,
+    analyze_nonlinear_sensitivity, NonlinearActiveConstraint, NonlinearActiveSide,
+    NonlinearScalingOptions, NonlinearScalingReport, NonlinearSensitivityRequest,
+    NonlinearSensitivityResult};
+
 pub mod sparse_optimization;
 pub use sparse_optimization::{solve_sparse_convex_qp, SparseLinearWorkspace,
     SparseQuadraticProblem, SparseSymmetricMatrix};
