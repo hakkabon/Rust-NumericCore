@@ -175,6 +175,10 @@ case identifiers, solver-family manifests, deterministic JSON snapshots,
 baseline-regression detection, and uploaded CI evidence. Run
 `cargo run -p nc-optimize --example numerical_validation -- standard` to
 produce the standard-tier artifact locally.
+Phase 52 adds a reusable sparse nonlinear KKT pipeline: exact graph Hessian and
+Jacobian lowering, one-time symbolic ordering, symmetric-indefinite LDLT
+refactorization, iterative refinement, inertia/fill diagnostics, and a standard-
+tier release gate proving symbolic reuse across changing numerical values.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

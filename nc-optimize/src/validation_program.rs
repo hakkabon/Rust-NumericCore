@@ -4,6 +4,7 @@ use crate::{
     minimize_lbfgs, presolve_problem, solve_convex_qp, Bound, BranchAndBoundSolver, LbfgsOptions,
     OptimizeError, PresolveOptions, Problem, QuadraticOptions, QuadraticProblem,
     RevisedSimplexSolver, ScaledSolver, ScalingOptions, Solver, SparseLinearWorkspace,
+    SparseHessian, SparseJacobian, SparseKktProblem, SparseKktWorkspace,
 };
 use crate::{
     ValidationCase, ValidationMetric, ValidationReport, ValidationTier, ValidationTolerance,
@@ -257,6 +258,33 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
         ValidationTier::Standard,
     );
 
+    let kkt_problem = SparseKktProblem {
+        hessian: SparseHessian { dimension: 2, row_pointers: vec![0, 1, 2],
+            column_indices: vec![0, 1], values: vec![2.0, 2.0] },
+        jacobian: SparseJacobian { rows: 1, columns: 2, row_pointers: vec![0, 2],
+            column_indices: vec![0, 1], values: vec![1.0, 1.0] },
+        primal_rhs: vec![-2.0, -4.0], constraint_rhs: vec![-1.0],
+        primal_regularization: 0.0, dual_regularization: 0.0, drop_tolerance: 0.0,
+    };
+    let mut kkt_workspace = SparseKktWorkspace::new(
+        &kkt_problem, nc_sparse::SparseOrdering::MinimumDegree)?;
+    kkt_workspace.solve(&kkt_problem)?;
+    let mut updated_kkt = kkt_problem.clone();
+    updated_kkt.hessian.values = vec![4.0, 3.0];
+    updated_kkt.primal_rhs = vec![-4.0, -3.0];
+    let kkt = kkt_workspace.solve(&updated_kkt)?;
+    let kkt_case = ValidationCase::new("reusable sparse nonlinear KKT pipeline", vec![
+        ValidationMetric::compare("KKT relative residual", kkt.relative_residual, 0.0,
+            ValidationTolerance::new(1e-12, 0.0)),
+        ValidationMetric::compare("KKT symbolic analyses", kkt.symbolic_analyses as f64, 1.0,
+            ValidationTolerance::new(0.0, 0.0)),
+        ValidationMetric::compare("KKT numeric factorizations", kkt.numeric_factorizations as f64,
+            2.0, ValidationTolerance::new(0.0, 0.0)),
+        ValidationMetric::compare("KKT negative inertia", kkt.inertia.negative as f64, 1.0,
+            ValidationTolerance::new(0.0, 0.0)),
+    ]).classified("internal.sparse.nonlinear-kkt", "sparse-nonlinear",
+        ValidationTier::Standard);
+
     let first = crate::deterministic_perturbation(&[1.0, -2.0, 3.0], 42, 1e-6);
     let second = crate::deterministic_perturbation(&[1.0, -2.0, 3.0], 42, 1e-6);
     let perturbation_case = ValidationCase::new(
@@ -288,6 +316,7 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
         nonlinear_case,
         presolve_case,
         sparse_case,
+        kkt_case,
         perturbation_case,
     ];
     cases.extend(crate::run_external_reference_validation()?);
@@ -302,11 +331,11 @@ mod tests {
     fn production_reference_program_passes() {
         let report = run_reference_validation().unwrap();
         assert!(report.passed(), "{report:#?}");
-        assert_eq!(report.cases.len(), 9);
+        assert_eq!(report.cases.len(), 10);
         assert_eq!(report.failure_count(), 0);
         assert!(report.maximum_normalized_error() <= 1.0);
         assert_eq!(report.for_tier(ValidationTier::Smoke).cases.len(), 4);
-        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 9);
+        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 10);
 
         let first = report.snapshot("rust", ValidationTier::Standard);
         let second = run_reference_validation()

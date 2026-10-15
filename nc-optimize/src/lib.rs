@@ -86,6 +86,7 @@ pub use sparse_derivatives::{SparseDerivative, SparseJacobian};
 pub mod second_order;
 pub use second_order::{
     solve_sparse_kkt, SecondOrderValue, SparseHessian, SparseKktProblem, SparseKktResult,
+    SparseKktWorkspace,
 };
 
 pub mod sqp;

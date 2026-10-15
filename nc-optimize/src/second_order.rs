@@ -1,7 +1,10 @@
 //! Exact second-order graph derivatives and sparse saddle-point KKT solves.
 
 use crate::{ConstrainedNonlinearProblem, NonlinearExpression, NonlinearNode, OptimizeError};
-use nc_sparse::{CooMatrix, SparseLu};
+use nc_sparse::{
+    CooMatrix, CsrMatrix, SparseInertia, SparseLdlt, SparseNumericOptions, SparseOrdering,
+    SparseSymbolicAnalysis,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SecondOrderValue {
@@ -145,6 +148,37 @@ impl ConstrainedNonlinearProblem {
             direction,
         ))
     }
+
+    /// Assemble graph derivatives directly into the reusable sparse KKT contract.
+    pub fn linearize_sparse_kkt(
+        &self, parameters: &[f64], constraint_weights: &[f64], primal_rhs: Vec<f64>,
+        constraint_rhs: Vec<f64>, primal_regularization: f64, dual_regularization: f64,
+        zero_tolerance: f64, drop_tolerance: f64,
+    ) -> Result<SparseKktProblem, OptimizeError> {
+        let n = self.model.parameter_count;
+        if primal_rhs.len() != n || constraint_rhs.len() != self.constraints.len()
+            || !zero_tolerance.is_finite() || zero_tolerance < 0.0 {
+            return Err(invalid("invalid sparse KKT linearization dimensions or tolerance"));
+        }
+        let hessian = sparse_hessian(
+            &self.lagrangian_hessian(parameters, constraint_weights)?, zero_tolerance);
+        let mut row_pointers = vec![0];
+        let mut column_indices = Vec::new();
+        let mut values = Vec::new();
+        for constraint in &self.constraints {
+            let (_, derivative) = constraint.expression.evaluate_sparse(parameters)?;
+            column_indices.extend(derivative.indices);
+            values.extend(derivative.values);
+            row_pointers.push(values.len());
+        }
+        Ok(SparseKktProblem {
+            hessian,
+            jacobian: crate::SparseJacobian { rows: self.constraints.len(), columns: n,
+                row_pointers, column_indices, values },
+            primal_rhs, constraint_rhs, primal_regularization, dual_regularization,
+            drop_tolerance,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -165,9 +199,93 @@ pub struct SparseKktResult {
     pub residual_norm: f64,
     pub relative_residual: f64,
     pub factor_nonzeros: usize,
+    pub symbolic_analyses: usize,
+    pub numeric_factorizations: usize,
+    pub solves: usize,
+    pub symbolic_reused: bool,
+    pub inertia: SparseInertia,
 }
 
 pub fn solve_sparse_kkt(problem: &SparseKktProblem) -> Result<SparseKktResult, OptimizeError> {
+    let mut workspace = SparseKktWorkspace::new(problem, SparseOrdering::MinimumDegree)?;
+    workspace.solve(problem)
+}
+
+/// Reusable sparse nonlinear linear-system pipeline. The structural analysis
+/// is retained while Hessian/Jacobian values and right-hand sides change.
+#[derive(Debug, Clone)]
+pub struct SparseKktWorkspace {
+    primal_dimension: usize,
+    constraint_dimension: usize,
+    analysis: SparseSymbolicAnalysis,
+    factor: Option<SparseLdlt>,
+    numeric_options: SparseNumericOptions,
+    symbolic_analyses: usize,
+    numeric_factorizations: usize,
+    solves: usize,
+}
+
+impl SparseKktWorkspace {
+    pub fn new(problem: &SparseKktProblem, ordering: SparseOrdering)
+        -> Result<Self, OptimizeError> {
+        let matrix = assemble_kkt(problem)?;
+        let analysis = SparseSymbolicAnalysis::analyze(&matrix, ordering)
+            .map_err(|error| invalid(&format!("sparse KKT analysis failed: {error}")))?;
+        Ok(Self {
+            primal_dimension: problem.hessian.dimension,
+            constraint_dimension: problem.jacobian.rows,
+            analysis,
+            factor: None,
+            numeric_options: SparseNumericOptions {
+                drop_tolerance: problem.drop_tolerance,
+                ..Default::default()
+            },
+            symbolic_analyses: 1,
+            numeric_factorizations: 0,
+            solves: 0,
+        })
+    }
+
+    pub fn solve(&mut self, problem: &SparseKktProblem) -> Result<SparseKktResult, OptimizeError> {
+        if problem.hessian.dimension != self.primal_dimension
+            || problem.jacobian.rows != self.constraint_dimension
+            || problem.drop_tolerance != self.numeric_options.drop_tolerance
+        {
+            return Err(invalid("sparse KKT workspace configuration changed"));
+        }
+        let matrix = assemble_kkt(problem)?;
+        let reused = self.factor.is_some();
+        if let Some(factor) = &mut self.factor {
+            factor.refactor(&matrix)
+                .map_err(|error| invalid(&format!("sparse KKT refactorization failed: {error}")))?;
+        } else {
+            self.factor = Some(SparseLdlt::factor_with_analysis(
+                &matrix, self.analysis.clone(), self.numeric_options.clone())
+                .map_err(|error| invalid(&format!("sparse KKT factorization failed: {error}")))?);
+        }
+        self.numeric_factorizations += 1;
+        let rhs: Vec<f64> = problem.primal_rhs.iter().chain(&problem.constraint_rhs)
+            .copied().collect();
+        let factor = self.factor.as_ref().unwrap();
+        let report = factor.solve_refined(&rhs)
+            .map_err(|error| invalid(&format!("sparse KKT solve failed: {error}")))?;
+        self.solves += 1;
+        Ok(SparseKktResult {
+            primal: report.solution[..self.primal_dimension].to_vec(),
+            dual: report.solution[self.primal_dimension..].to_vec(),
+            residual_norm: report.residual_norm,
+            relative_residual: report.relative_residual,
+            factor_nonzeros: report.diagnostics.factor_nonzeros,
+            symbolic_analyses: self.symbolic_analyses,
+            numeric_factorizations: self.numeric_factorizations,
+            solves: self.solves,
+            symbolic_reused: reused,
+            inertia: factor.inertia(),
+        })
+    }
+}
+
+fn assemble_kkt(problem: &SparseKktProblem) -> Result<CsrMatrix<f64>, OptimizeError> {
     let n = problem.hessian.dimension;
     let m = problem.jacobian.rows;
     if problem.jacobian.columns != n
@@ -216,27 +334,9 @@ pub fn solve_sparse_kkt(problem: &SparseKktProblem) -> Result<SparseKktResult, O
                 .map_err(|error| invalid(&error.to_string()))?;
         }
     }
-    let matrix = matrix
+    matrix
         .to_csr()
-        .map_err(|error| invalid(&error.to_string()))?;
-    let rhs: Vec<f64> = problem
-        .primal_rhs
-        .iter()
-        .chain(&problem.constraint_rhs)
-        .copied()
-        .collect();
-    let factor = SparseLu::factor(&matrix, problem.drop_tolerance)
-        .map_err(|error| invalid(&format!("sparse KKT factorization failed: {error}")))?;
-    let report = factor
-        .solve_report(&matrix, &rhs)
-        .map_err(|error| invalid(&format!("sparse KKT solve failed: {error}")))?;
-    Ok(SparseKktResult {
-        primal: report.solution[..n].to_vec(),
-        dual: report.solution[n..].to_vec(),
-        residual_norm: report.residual_norm,
-        relative_residual: report.relative_residual,
-        factor_nonzeros: report.factor_nonzeros,
-    })
+        .map_err(|error| invalid(&error.to_string()))
 }
 
 fn second_order_node(
@@ -513,5 +613,21 @@ mod tests {
         assert!((result.primal[0]).abs() < 1e-12);
         assert!((result.primal[1] + 1.0).abs() < 1e-12);
         assert!(result.relative_residual < 1e-12);
+        assert_eq!(result.inertia, SparseInertia { positive: 2, negative: 1, zero: 0 });
+        assert_eq!(result.symbolic_analyses, 1);
+        assert!(!result.symbolic_reused);
+
+        let mut workspace = SparseKktWorkspace::new(&problem, SparseOrdering::MinimumDegree).unwrap();
+        let first = workspace.solve(&problem).unwrap();
+        let mut updated = problem.clone();
+        updated.hessian.values = vec![4.0, 3.0];
+        updated.primal_rhs = vec![-4.0, -3.0];
+        let second = workspace.solve(&updated).unwrap();
+        assert!(!first.symbolic_reused);
+        assert!(second.symbolic_reused);
+        assert_eq!(second.symbolic_analyses, 1);
+        assert_eq!(second.numeric_factorizations, 2);
+        assert_eq!(second.solves, 2);
+        assert!(second.relative_residual < 1e-12);
     }
 }
