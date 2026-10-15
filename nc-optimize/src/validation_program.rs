@@ -5,6 +5,7 @@ use crate::{
     OptimizeError, PresolveOptions, Problem, QuadraticOptions, QuadraticProblem,
     RevisedSimplexSolver, ScaledSolver, ScalingOptions, Solver, SparseLinearWorkspace,
     SparseHessian, SparseJacobian, SparseKktProblem, SparseKktWorkspace,
+    certify_convex_qp, CertificateClaim, CertificateTolerance,
 };
 use crate::{
     ValidationCase, ValidationMetric, ValidationReport, ValidationTier, ValidationTolerance,
@@ -109,6 +110,19 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
         "quadratic-programming",
         ValidationTier::Smoke,
     );
+    let qp_certificate = certify_convex_qp(&qp, &qp_result, CertificateTolerance::default())?;
+    let certificate_case = ValidationCase::new("independent convex QP certificate", vec![
+        ValidationMetric::compare("QP certificate verified",
+            if qp_certificate.verified() { 1.0 } else { 0.0 }, 1.0,
+            ValidationTolerance::new(0.0, 0.0)),
+        ValidationMetric::compare("QP optimality claim",
+            if qp_certificate.claim == CertificateClaim::Optimality { 1.0 } else { 0.0 }, 1.0,
+            ValidationTolerance::new(0.0, 0.0)),
+        ValidationMetric::compare("QP certificate failures",
+            qp_certificate.metrics.iter().filter(|metric| !metric.passed).count() as f64, 0.0,
+            ValidationTolerance::new(0.0, 0.0)),
+    ]).classified("internal.certificate.qp-kkt", "optimization-certification",
+        ValidationTier::Standard);
 
     let milp = Problem {
         objective: vec![-2.0, -1.0],
@@ -312,6 +326,7 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
     let mut cases = vec![
         lp_case,
         qp_case,
+        certificate_case,
         milp_case,
         nonlinear_case,
         presolve_case,
@@ -331,11 +346,11 @@ mod tests {
     fn production_reference_program_passes() {
         let report = run_reference_validation().unwrap();
         assert!(report.passed(), "{report:#?}");
-        assert_eq!(report.cases.len(), 10);
+        assert_eq!(report.cases.len(), 11);
         assert_eq!(report.failure_count(), 0);
         assert!(report.maximum_normalized_error() <= 1.0);
         assert_eq!(report.for_tier(ValidationTier::Smoke).cases.len(), 4);
-        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 10);
+        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 11);
 
         let first = report.snapshot("rust", ValidationTier::Standard);
         let second = run_reference_validation()

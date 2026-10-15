@@ -224,6 +224,10 @@ pub use validation::{deterministic_perturbation, validate_linear_system, LinearS
 pub mod external_validation;
 pub use external_validation::run_external_reference_validation;
 
+pub mod optimization_certificate;
+pub use optimization_certificate::{certify_convex_qp, certify_linear_solution, CertificateClaim,
+    CertificateMetric, CertificateTolerance, OptimizationCertificate};
+
 /// Bound on a variable or constraint. `None` means unbounded in that
 /// direction (`-inf` / `+inf`).
 #[derive(Debug, Clone, Copy, PartialEq)]

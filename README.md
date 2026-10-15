@@ -179,6 +179,11 @@ Phase 52 adds a reusable sparse nonlinear KKT pipeline: exact graph Hessian and
 Jacobian lowering, one-time symbolic ordering, symmetric-indefinite LDLT
 refactorization, iterative refinement, inertia/fill diagnostics, and a standard-
 tier release gate proving symbolic reuse across changing numerical values.
+Phase 53 adds independent optimization certificates with typed claims and
+auditable metrics. LP/MILP results are checked for original-model feasibility
+and integrality and require a supplied global gap for optimality; convex QPs
+receive full primal/KKT/complementarity verification and active-set rank
+warnings. Invalid or non-finite evidence fails closed.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's
