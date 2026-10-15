@@ -7,7 +7,8 @@ use crate::{
     SparseHessian, SparseJacobian, SparseKktProblem, SparseKktWorkspace,
     certify_convex_qp, consistent_dae_initial_conditions, integrate_dae_with_events,
     parse_spice_netlist, CertificateClaim, CertificateTolerance, DaeEvaluation, EventDirection,
-    SpiceAnalysis, TimeIntegrationOptions,
+    SpiceAnalysis, TimeIntegrationOptions, ContinuumFemModel, ContinuumKinematics,
+    ContinuumTriangle3, FemConstraint, FemNode2D, FemNodalLoad, LinearElasticContinuumMaterial,
 };
 use crate::{
     ValidationCase, ValidationMetric, ValidationReport, ValidationTier, ValidationTolerance,
@@ -343,6 +344,31 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
             1.0, ValidationTolerance::new(0.0, 0.0)),
     ]).classified("internal.dae.production", "time-integration", ValidationTier::Standard);
 
+    let continuum = ContinuumFemModel {
+        nodes: vec![FemNode2D { x: 0.0, y: 0.0 }, FemNode2D { x: 1.0, y: 0.0 },
+            FemNode2D { x: 0.0, y: 1.0 }],
+        materials: vec![LinearElasticContinuumMaterial { young_modulus: 200.0,
+            poisson_ratio: 0.3, thickness: 1.0, kinematics: ContinuumKinematics::PlaneStress }],
+        elements: vec![ContinuumTriangle3 { nodes: [0, 1, 2], material: 0,
+            body_force_x: 0.0, body_force_y: 0.0 }],
+        constraints: vec![FemConstraint { dof: 0, value: 0.0 },
+            FemConstraint { dof: 1, value: 0.0 }, FemConstraint { dof: 3, value: 0.0 },
+            FemConstraint { dof: 4, value: 0.0 }],
+        loads: vec![FemNodalLoad { dof: 2, value: 5.0 }],
+    }.solve()?;
+    let continuum_case = ValidationCase::new("continuum plane-stress patch test", vec![
+        ValidationMetric::compare("continuum axial displacement",
+            continuum.static_result.values[2], 0.05, tight),
+        ValidationMetric::compare("continuum Poisson displacement",
+            continuum.static_result.values[5], -0.015, tight),
+        ValidationMetric::compare("continuum axial stress", continuum.elements[0].stress[0],
+            10.0, tight),
+        ValidationMetric::compare("continuum energy mismatch",
+            continuum.maximum_element_energy_mismatch, 0.0,
+            ValidationTolerance::new(1e-12, 0.0)),
+    ]).classified("internal.fem.continuum-patch", "finite-element-analysis",
+        ValidationTier::Standard);
+
     let first = crate::deterministic_perturbation(&[1.0, -2.0, 3.0], 42, 1e-6);
     let second = crate::deterministic_perturbation(&[1.0, -2.0, 3.0], 42, 1e-6);
     let perturbation_case = ValidationCase::new(
@@ -378,6 +404,7 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
         kkt_case,
         spice_case,
         dae_case,
+        continuum_case,
         perturbation_case,
     ];
     cases.extend(crate::run_external_reference_validation()?);
@@ -392,11 +419,11 @@ mod tests {
     fn production_reference_program_passes() {
         let report = run_reference_validation().unwrap();
         assert!(report.passed(), "{report:#?}");
-        assert_eq!(report.cases.len(), 13);
+        assert_eq!(report.cases.len(), 14);
         assert_eq!(report.failure_count(), 0);
         assert!(report.maximum_normalized_error() <= 1.0);
         assert_eq!(report.for_tier(ValidationTier::Smoke).cases.len(), 4);
-        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 13);
+        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 14);
 
         let first = report.snapshot("rust", ValidationTier::Standard);
         let second = run_reference_validation()

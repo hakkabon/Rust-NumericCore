@@ -1,4 +1,5 @@
-//! Linear finite-element assembly for thermal triangles and planar trusses.
+//! Linear finite-element assembly for thermal triangles, planar trusses, and
+//! two-dimensional elastic continua.
 
 use crate::OptimizeError;
 use nc_sparse::{CooMatrix, CsrMatrix, SparseCholesky};
@@ -88,6 +89,269 @@ pub struct FemStaticResult {
 pub struct TrussStaticResult {
     pub static_result: FemStaticResult,
     pub elements: Vec<TrussElementResult>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContinuumKinematics {
+    PlaneStress,
+    PlaneStrain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LinearElasticContinuumMaterial {
+    pub young_modulus: f64,
+    pub poisson_ratio: f64,
+    pub thickness: f64,
+    pub kinematics: ContinuumKinematics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContinuumTriangle3 {
+    pub nodes: [usize; 3],
+    pub material: usize,
+    pub body_force_x: f64,
+    pub body_force_y: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContinuumElementResult {
+    /// `[epsilon_xx, epsilon_yy, gamma_xy]`.
+    pub strain: [f64; 3],
+    /// `[sigma_xx, sigma_yy, tau_xy, sigma_zz]`.
+    pub stress: [f64; 4],
+    pub von_mises_stress: f64,
+    pub principal_stress_maximum: f64,
+    pub principal_stress_minimum: f64,
+    pub strain_energy: f64,
+    pub area: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContinuumFemModel {
+    pub nodes: Vec<FemNode2D>,
+    pub materials: Vec<LinearElasticContinuumMaterial>,
+    pub elements: Vec<ContinuumTriangle3>,
+    pub constraints: Vec<FemConstraint>,
+    pub loads: Vec<FemNodalLoad>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContinuumStaticResult {
+    pub static_result: FemStaticResult,
+    pub elements: Vec<ContinuumElementResult>,
+    pub maximum_element_energy_mismatch: f64,
+}
+
+impl ContinuumFemModel {
+    pub fn solve(&self) -> Result<ContinuumStaticResult, OptimizeError> {
+        self.validate()?;
+        let count = 2 * self.nodes.len();
+        let mut stiffness = CooMatrix::new(count, count);
+        let mut rhs = vec![0.0; count];
+        add_loads(&mut rhs, &self.loads)?;
+        for element in &self.elements {
+            let (area, material, strain_displacement, constitutive) = self.element_data(element)?;
+            let dofs = continuum_dofs(element.nodes);
+            for local_node in 0..3 {
+                rhs[dofs[2 * local_node]] += element.body_force_x * material.thickness * area / 3.0;
+                rhs[dofs[2 * local_node + 1]] +=
+                    element.body_force_y * material.thickness * area / 3.0;
+            }
+            let db = continuum_matrix_product(&constitutive, &strain_displacement);
+            let factor = material.thickness * area;
+            for row in 0..6 {
+                for column in 0..6 {
+                    let value = (0..3)
+                        .map(|index| strain_displacement[index][row] * db[index][column])
+                        .sum::<f64>();
+                    stiffness.push(dofs[row], dofs[column], factor * value)?;
+                }
+            }
+        }
+        let static_result = solve_constrained(stiffness.to_csr()?, rhs, &self.constraints)?;
+        let mut recovered_energy = 0.0;
+        let mut recovered = Vec::with_capacity(self.elements.len());
+        for element in &self.elements {
+            let (area, material, strain_displacement, constitutive) = self.element_data(element)?;
+            let dofs = continuum_dofs(element.nodes);
+            let displacement = dofs.map(|dof| static_result.values[dof]);
+            let strain_values = continuum_matrix_vector(&strain_displacement, &displacement);
+            let stress_values = continuum_matrix_vector(&constitutive, &strain_values);
+            let strain = [strain_values[0], strain_values[1], strain_values[2]];
+            let sigma_zz = match material.kinematics {
+                ContinuumKinematics::PlaneStress => 0.0,
+                ContinuumKinematics::PlaneStrain => {
+                    material.young_modulus * material.poisson_ratio
+                        / ((1.0 + material.poisson_ratio) * (1.0 - 2.0 * material.poisson_ratio))
+                        * (strain[0] + strain[1])
+                }
+            };
+            let mean = 0.5 * (stress_values[0] + stress_values[1]);
+            let radius = (0.5 * (stress_values[0] - stress_values[1])).hypot(stress_values[2]);
+            let von_mises = (0.5
+                * ((stress_values[0] - stress_values[1]).powi(2)
+                    + (stress_values[1] - sigma_zz).powi(2)
+                    + (sigma_zz - stress_values[0]).powi(2))
+                + 3.0 * stress_values[2].powi(2))
+            .sqrt();
+            let energy = 0.5
+                * material.thickness
+                * area
+                * strain
+                    .iter()
+                    .zip(&stress_values)
+                    .map(|(epsilon, sigma)| epsilon * sigma)
+                    .sum::<f64>();
+            recovered_energy += energy;
+            recovered.push(ContinuumElementResult {
+                strain,
+                stress: [
+                    stress_values[0],
+                    stress_values[1],
+                    stress_values[2],
+                    sigma_zz,
+                ],
+                von_mises_stress: von_mises,
+                principal_stress_maximum: mean + radius,
+                principal_stress_minimum: mean - radius,
+                strain_energy: energy,
+                area,
+            });
+        }
+        Ok(ContinuumStaticResult {
+            maximum_element_energy_mismatch: (recovered_energy - static_result.strain_energy).abs(),
+            static_result,
+            elements: recovered,
+        })
+    }
+
+    fn validate(&self) -> Result<(), OptimizeError> {
+        validate_common(2 * self.nodes.len(), &self.constraints, &self.loads)?;
+        if self.nodes.len() < 3
+            || self.materials.is_empty()
+            || self.elements.is_empty()
+            || self
+                .nodes
+                .iter()
+                .any(|node| !node.x.is_finite() || !node.y.is_finite())
+            || self.materials.iter().any(|material| {
+                !material.young_modulus.is_finite()
+                    || material.young_modulus <= 0.0
+                    || !material.poisson_ratio.is_finite()
+                    || material.poisson_ratio <= -1.0
+                    || material.poisson_ratio >= 0.5
+                    || !material.thickness.is_finite()
+                    || material.thickness <= 0.0
+            })
+            || self.elements.iter().any(|element| {
+                element.material >= self.materials.len()
+                    || element.nodes.iter().any(|node| *node >= self.nodes.len())
+                    || !element.body_force_x.is_finite()
+                    || !element.body_force_y.is_finite()
+            })
+        {
+            return Err(invalid("invalid continuum FEM model"));
+        }
+        let mut used = BTreeSet::new();
+        for element in &self.elements {
+            let mut key = element.nodes;
+            key.sort();
+            if element.nodes.iter().collect::<BTreeSet<_>>().len() != 3 || !used.insert(key) {
+                return Err(invalid(
+                    "continuum elements must be distinct non-repeated triangles",
+                ));
+            }
+            triangle_geometry(element.nodes.map(|node| self.nodes[node]))?;
+        }
+        Ok(())
+    }
+
+    fn element_data(
+        &self,
+        element: &ContinuumTriangle3,
+    ) -> Result<
+        (
+            f64,
+            LinearElasticContinuumMaterial,
+            Vec<Vec<f64>>,
+            Vec<Vec<f64>>,
+        ),
+        OptimizeError,
+    > {
+        let coordinates = element.nodes.map(|node| self.nodes[node]);
+        let (area, b, c) = triangle_geometry(coordinates)?;
+        let signed_twice_area = (coordinates[1].x - coordinates[0].x)
+            * (coordinates[2].y - coordinates[0].y)
+            - (coordinates[2].x - coordinates[0].x) * (coordinates[1].y - coordinates[0].y);
+        let scale = 1.0 / signed_twice_area;
+        let mut strain_displacement = vec![vec![0.0; 6]; 3];
+        for node in 0..3 {
+            strain_displacement[0][2 * node] = b[node] * scale;
+            strain_displacement[1][2 * node + 1] = c[node] * scale;
+            strain_displacement[2][2 * node] = c[node] * scale;
+            strain_displacement[2][2 * node + 1] = b[node] * scale;
+        }
+        let material = self.materials[element.material];
+        Ok((
+            area,
+            material,
+            strain_displacement,
+            continuum_constitutive(material),
+        ))
+    }
+}
+
+fn continuum_dofs(nodes: [usize; 3]) -> [usize; 6] {
+    [
+        2 * nodes[0],
+        2 * nodes[0] + 1,
+        2 * nodes[1],
+        2 * nodes[1] + 1,
+        2 * nodes[2],
+        2 * nodes[2] + 1,
+    ]
+}
+fn continuum_constitutive(material: LinearElasticContinuumMaterial) -> Vec<Vec<f64>> {
+    let e = material.young_modulus;
+    let nu = material.poisson_ratio;
+    match material.kinematics {
+        ContinuumKinematics::PlaneStress => {
+            let factor = e / (1.0 - nu * nu);
+            vec![
+                vec![factor, factor * nu, 0.0],
+                vec![factor * nu, factor, 0.0],
+                vec![0.0, 0.0, factor * (1.0 - nu) / 2.0],
+            ]
+        }
+        ContinuumKinematics::PlaneStrain => {
+            let factor = e / ((1.0 + nu) * (1.0 - 2.0 * nu));
+            vec![
+                vec![factor * (1.0 - nu), factor * nu, 0.0],
+                vec![factor * nu, factor * (1.0 - nu), 0.0],
+                vec![0.0, 0.0, factor * (1.0 - 2.0 * nu) / 2.0],
+            ]
+        }
+    }
+}
+fn continuum_matrix_vector(matrix: &[Vec<f64>], vector: &[f64]) -> Vec<f64> {
+    matrix
+        .iter()
+        .map(|row| row.iter().zip(vector).map(|(a, b)| a * b).sum())
+        .collect()
+}
+fn continuum_matrix_product(first: &[Vec<f64>], second: &[Vec<f64>]) -> Vec<Vec<f64>> {
+    first
+        .iter()
+        .map(|row| {
+            (0..second[0].len())
+                .map(|column| {
+                    (0..row.len())
+                        .map(|index| row[index] * second[index][column])
+                        .sum()
+                })
+                .collect()
+        })
+        .collect()
 }
 
 impl ThermalFemModel {
@@ -916,7 +1180,8 @@ mod tests {
                 thickness: 1.,
             }],
             elements: vec![ThermalTriangle3 {
-                nodes: [0, 1, 2],
+                // Clockwise connectivity must produce the same physical field.
+                nodes: [0, 2, 1],
                 material: 0,
                 heat_source: 0.,
             }],
@@ -957,6 +1222,76 @@ mod tests {
         assert!((result.elements[0].stress - 10.).abs() < 1e-12);
         assert!((result.elements[0].axial_force - 30.).abs() < 1e-12);
         assert!((result.static_result.reactions[0] + 30.).abs() < 1e-12);
+    }
+
+    #[test]
+    fn plane_stress_triangle_passes_uniaxial_patch_test() {
+        let model = ContinuumFemModel {
+            nodes: vec![
+                FemNode2D { x: 0., y: 0. },
+                FemNode2D { x: 1., y: 0. },
+                FemNode2D { x: 0., y: 1. },
+            ],
+            materials: vec![LinearElasticContinuumMaterial {
+                young_modulus: 200.,
+                poisson_ratio: 0.3,
+                thickness: 1.,
+                kinematics: ContinuumKinematics::PlaneStress,
+            }],
+            elements: vec![ContinuumTriangle3 {
+                nodes: [0, 1, 2],
+                material: 0,
+                body_force_x: 0.,
+                body_force_y: 0.,
+            }],
+            constraints: vec![
+                FemConstraint { dof: 0, value: 0. },
+                FemConstraint { dof: 1, value: 0. },
+                FemConstraint { dof: 3, value: 0. },
+                FemConstraint { dof: 4, value: 0. },
+            ],
+            loads: vec![FemNodalLoad { dof: 2, value: 5. }],
+        };
+        let result = model.solve().unwrap();
+        assert!((result.static_result.values[2] - 0.05).abs() < 1e-12);
+        assert!((result.static_result.values[5] + 0.015).abs() < 1e-12);
+        assert!((result.elements[0].stress[0] - 10.).abs() < 1e-10);
+        assert!(result.elements[0].stress[1].abs() < 1e-10);
+        assert!((result.elements[0].von_mises_stress - 10.).abs() < 1e-10);
+        assert!(result.maximum_element_energy_mismatch < 1e-12);
+    }
+
+    #[test]
+    fn plane_strain_recovers_out_of_plane_stress_and_body_force() {
+        let model = ContinuumFemModel {
+            nodes: vec![
+                FemNode2D { x: 0., y: 0. },
+                FemNode2D { x: 1., y: 0. },
+                FemNode2D { x: 0., y: 1. },
+            ],
+            materials: vec![LinearElasticContinuumMaterial {
+                young_modulus: 100.,
+                poisson_ratio: 0.25,
+                thickness: 1.,
+                kinematics: ContinuumKinematics::PlaneStrain,
+            }],
+            elements: vec![ContinuumTriangle3 {
+                nodes: [0, 1, 2],
+                material: 0,
+                body_force_x: 6.,
+                body_force_y: 0.,
+            }],
+            constraints: vec![
+                FemConstraint { dof: 0, value: 0. },
+                FemConstraint { dof: 1, value: 0. },
+                FemConstraint { dof: 3, value: 0. },
+                FemConstraint { dof: 4, value: 0. },
+            ],
+            loads: vec![],
+        };
+        let result = model.solve().unwrap();
+        assert!(result.elements[0].stress[3].is_finite());
+        assert!((result.static_result.reactions.iter().sum::<f64>() + 3.).abs() < 1e-10);
     }
 
     fn dynamic_bar() -> TrussFemModel {

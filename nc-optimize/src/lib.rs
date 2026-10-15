@@ -208,9 +208,11 @@ pub use spice::{parse_spice_netlist, ParsedSpiceNetlist, SpiceAcAnalysis, SpiceA
     SpiceAnalysis, SpiceDiagnostic, SpiceNetlistError};
 pub mod fem;
 pub use fem::{
-    FemConstraint, FemDynamicOptions, FemDynamicResult, FemDynamicState, FemModalResult,
+    ContinuumElementResult, ContinuumFemModel, ContinuumKinematics, ContinuumStaticResult,
+    ContinuumTriangle3, FemConstraint, FemDynamicOptions, FemDynamicResult, FemDynamicState, FemModalResult,
     FemNodalLoad, FemNode2D, FemStaticResult, ThermalFemModel, ThermalMaterial, ThermalTriangle3,
-    TrussElement2D, TrussElementResult, TrussFemModel, TrussMaterial, TrussStaticResult,
+    LinearElasticContinuumMaterial, TrussElement2D, TrussElementResult, TrussFemModel,
+    TrussMaterial, TrussStaticResult,
 };
 
 pub mod scaling;

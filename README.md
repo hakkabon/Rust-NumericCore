@@ -193,6 +193,10 @@ Phase 55 adds Jacobian-based consistent initialization for singular-mass
 index-1 DAEs, directional and terminal event location, and validated hard step
 stops. Circuit transients automatically feed source-waveform breakpoints to the
 implicit integrator so discontinuities are never crossed by one accepted step.
+Phase 56 adds constant-strain triangular continuum elasticity for plane stress
+and plane strain, with consistent body forces, sparse constrained assembly,
+full stress/strain and principal/von-Mises recovery, reactions, and independent
+element-versus-global energy diagnostics.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's
