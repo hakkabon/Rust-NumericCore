@@ -9,6 +9,9 @@ use crate::{
     parse_spice_netlist, CertificateClaim, CertificateTolerance, DaeEvaluation, EventDirection,
     SpiceAnalysis, TimeIntegrationOptions, ContinuumFemModel, ContinuumKinematics,
     ContinuumTriangle3, FemConstraint, FemNode2D, FemNodalLoad, LinearElasticContinuumMaterial,
+    EngineeringElement, EngineeringEquation, EngineeringModel, EngineeringParameter,
+    EngineeringPort, EngineeringResponseGradient, EngineeringUnknown, EngineeringUnknownRole,
+    NonlinearExpression, NonlinearNode,
 };
 use crate::{
     ValidationCase, ValidationMetric, ValidationReport, ValidationTier, ValidationTolerance,
@@ -369,6 +372,35 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
     ]).classified("internal.fem.continuum-patch", "finite-element-analysis",
         ValidationTier::Standard);
 
+    use NonlinearNode::*;
+    let sensitivity_expression = NonlinearExpression::new(vec![
+        Parameter(4), Parameter(2), Multiply(0, 1), Parameter(3), Parameter(1),
+        Multiply(3, 4), Add(2, 5), Parameter(5), Subtract(6, 7)], 8);
+    let sensitivity_model = EngineeringModel::new(
+        vec![EngineeringUnknown { name: "y".into(), unit: "m".into(),
+            role: EngineeringUnknownRole::Algebraic, scale: 1.0,
+            initial_value: 0.0, initial_derivative: 0.0 }],
+        vec![EngineeringParameter { name: "k".into(), unit: "N/m".into(), value: 4.0 },
+            EngineeringParameter { name: "C".into(), unit: "N s/m".into(), value: 2.0 },
+            EngineeringParameter { name: "p".into(), unit: "N".into(), value: 8.0 }],
+        vec![EngineeringElement { name: "balance".into(), kind: "scalar".into(),
+            ports: vec![EngineeringPort { name: "y".into(), unknown: 0, orientation: 1.0 }],
+            equations: vec![EngineeringEquation { row: 0,
+                expression: sensitivity_expression }] }])?;
+    let sensitivity = sensitivity_model.sensitivities(0.0, &[2.0], &[0.0], 0.0,
+        &[EngineeringResponseGradient { name: "displacement".into(),
+            state_gradient: vec![1.0], direct_parameter_gradient: vec![0.0; 3] }])?;
+    let sensitivity_case = ValidationCase::new("engineering forward and adjoint sensitivity", vec![
+        ValidationMetric::compare("load sensitivity",
+            sensitivity.responses[0].parameter_gradient[2], 0.25, tight),
+        ValidationMetric::compare("stiffness sensitivity",
+            sensitivity.responses[0].parameter_gradient[0], -0.5, tight),
+        ValidationMetric::compare("forward-adjoint mismatch",
+            sensitivity.responses[0].maximum_forward_adjoint_mismatch, 0.0,
+            ValidationTolerance::new(1e-12, 0.0)),
+    ]).classified("internal.engineering.adjoint", "engineering-sensitivity",
+        ValidationTier::Standard);
+
     let first = crate::deterministic_perturbation(&[1.0, -2.0, 3.0], 42, 1e-6);
     let second = crate::deterministic_perturbation(&[1.0, -2.0, 3.0], 42, 1e-6);
     let perturbation_case = ValidationCase::new(
@@ -405,6 +437,7 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
         spice_case,
         dae_case,
         continuum_case,
+        sensitivity_case,
         perturbation_case,
     ];
     cases.extend(crate::run_external_reference_validation()?);
@@ -419,11 +452,11 @@ mod tests {
     fn production_reference_program_passes() {
         let report = run_reference_validation().unwrap();
         assert!(report.passed(), "{report:#?}");
-        assert_eq!(report.cases.len(), 14);
+        assert_eq!(report.cases.len(), 15);
         assert_eq!(report.failure_count(), 0);
         assert!(report.maximum_normalized_error() <= 1.0);
         assert_eq!(report.for_tier(ValidationTier::Smoke).cases.len(), 4);
-        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 14);
+        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 15);
 
         let first = report.snapshot("rust", ValidationTier::Standard);
         let second = run_reference_validation()

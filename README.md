@@ -197,6 +197,9 @@ Phase 56 adds constant-strain triangular continuum elasticity for plane stress
 and plane strain, with consistent body forces, sparse constrained assembly,
 full stress/strain and principal/von-Mises recovery, reactions, and independent
 element-versus-global energy diagnostics.
+Phase 57 adds sparse implicit forward engineering sensitivities and discrete
+adjoints, including effective DAE tangents, direct response dependence, and
+forward/adjoint consistency diagnostics.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

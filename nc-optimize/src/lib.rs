@@ -192,6 +192,10 @@ pub use engineering_model::{
     EngineeringAssembly, EngineeringElement, EngineeringEquation, EngineeringModel,
     EngineeringParameter, EngineeringPort, EngineeringUnknown, EngineeringUnknownRole,
 };
+pub mod engineering_sensitivity;
+pub use engineering_sensitivity::{
+    EngineeringResponseGradient, EngineeringResponseSensitivity, EngineeringSensitivityResult,
+};
 
 pub mod circuit;
 pub use circuit::{
