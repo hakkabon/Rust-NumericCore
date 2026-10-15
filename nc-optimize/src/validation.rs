@@ -45,11 +45,27 @@ impl ValidationMetric {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ValidationCase { pub name: String, pub metrics: Vec<ValidationMetric> }
+pub struct ValidationProvenance {
+    pub collection: String,
+    pub problem: String,
+    pub citation: String,
+    pub source_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidationCase {
+    pub name: String,
+    pub metrics: Vec<ValidationMetric>,
+    pub provenance: Option<ValidationProvenance>,
+}
 
 impl ValidationCase {
     pub fn new(name: impl Into<String>, metrics: Vec<ValidationMetric>) -> Self {
-        Self { name: name.into(), metrics }
+        Self { name: name.into(), metrics, provenance: None }
+    }
+    pub fn external(name: impl Into<String>, metrics: Vec<ValidationMetric>,
+                    provenance: ValidationProvenance) -> Self {
+        Self { name: name.into(), metrics, provenance: Some(provenance) }
     }
     pub fn passed(&self) -> bool { !self.metrics.is_empty() && self.metrics.iter().all(|m| m.passed) }
 }

@@ -168,6 +168,8 @@ active-set polishing through a pivoted equality-constrained KKT solve.
 Phase 49 adds equilibrated active-set KKT analysis for constrained nonlinear
 solutions, with implicit first-order primal and multiplier sensitivities to
 objective-gradient, nonlinear-bound, and variable-bound perturbations.
+Phase 50 adds provenance-tagged external validation using NIST StRD Misra1a and
+CUTEst HS71, integrated into the offline deterministic release-gating report.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

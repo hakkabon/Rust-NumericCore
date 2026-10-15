@@ -244,7 +244,7 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
             .collect(),
     );
 
-    Ok(ValidationReport::new(vec![
+    let mut cases = vec![
         lp_case,
         qp_case,
         milp_case,
@@ -252,7 +252,9 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
         presolve_case,
         sparse_case,
         perturbation_case,
-    ]))
+    ];
+    cases.extend(crate::run_external_reference_validation()?);
+    Ok(ValidationReport::new(cases))
 }
 
 #[cfg(test)]
@@ -263,7 +265,7 @@ mod tests {
     fn production_reference_program_passes() {
         let report = run_reference_validation().unwrap();
         assert!(report.passed(), "{report:#?}");
-        assert_eq!(report.cases.len(), 7);
+        assert_eq!(report.cases.len(), 9);
         assert_eq!(report.failure_count(), 0);
         assert!(report.maximum_normalized_error() <= 1.0);
     }
