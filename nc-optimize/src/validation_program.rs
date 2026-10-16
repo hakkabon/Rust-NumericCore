@@ -13,6 +13,8 @@ use crate::{
     EngineeringPort, EngineeringResponseGradient, EngineeringUnknown, EngineeringUnknownRole,
     minimize_global_minlp, GlobalMinlpOptions, GlobalMinlpProblem, NonlinearExpression,
     NonlinearNode,
+    optimize_multiphysics_design, MultiphysicsDesignProblem, MultiphysicsDesignVariable,
+    MultiphysicsDiscipline, MultiphysicsModel,
 };
 use crate::{
     ValidationCase, ValidationMetric, ValidationReport, ValidationTier, ValidationTolerance,
@@ -422,6 +424,52 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
     ]).classified("internal.minlp.integer-envelope", "global-mixed-integer-nonlinear",
         ValidationTier::Standard);
 
+    let coupled_field = NonlinearExpression::new(vec![
+        NonlinearNode::Parameter(1), NonlinearNode::Parameter(5), NonlinearNode::Parameter(2),
+        NonlinearNode::Multiply(1, 2), NonlinearNode::Add(0, 3),
+        NonlinearNode::Parameter(7), NonlinearNode::Subtract(4, 5)], 6);
+    let coupled_thermal = NonlinearExpression::new(vec![
+        NonlinearNode::Parameter(2), NonlinearNode::Parameter(6), NonlinearNode::Parameter(1),
+        NonlinearNode::Multiply(1, 2), NonlinearNode::Subtract(0, 3)], 4);
+    let coupled_engineering = EngineeringModel::new(vec![
+        EngineeringUnknown { name: "x".into(), unit: "m".into(),
+            role: EngineeringUnknownRole::Algebraic, scale: 1.0,
+            initial_value: 0.0, initial_derivative: 0.0 },
+        EngineeringUnknown { name: "T".into(), unit: "K".into(),
+            role: EngineeringUnknownRole::Algebraic, scale: 1.0,
+            initial_value: 0.0, initial_derivative: 0.0 }], vec![
+        EngineeringParameter { name: "a".into(), unit: "1".into(), value: 0.5 },
+        EngineeringParameter { name: "b".into(), unit: "1".into(), value: 0.4 },
+        EngineeringParameter { name: "p".into(), unit: "N".into(), value: 1.0 }],
+        vec![EngineeringElement { name: "coupler".into(), kind: "field-thermal".into(),
+            ports: vec![EngineeringPort { name: "field".into(), unknown: 0, orientation: 1.0 },
+                EngineeringPort { name: "thermal".into(), unknown: 1, orientation: 1.0 }],
+            equations: vec![EngineeringEquation { row: 0, expression: coupled_field },
+                EngineeringEquation { row: 1, expression: coupled_thermal }] }])?;
+    let coupled_model = MultiphysicsModel::new(coupled_engineering, vec![
+        MultiphysicsDiscipline { name: "field".into(), equation_rows: vec![0] },
+        MultiphysicsDiscipline { name: "thermal".into(), equation_rows: vec![1] }])?;
+    let design_response = NonlinearExpression::new(vec![
+        NonlinearNode::Parameter(0), NonlinearNode::Constant(2.0), NonlinearNode::Subtract(0, 1),
+        NonlinearNode::Powf(2, 2.0), NonlinearNode::Constant(0.5),
+        NonlinearNode::Multiply(3, 4), NonlinearNode::Parameter(4),
+        NonlinearNode::Powf(6, 2.0), NonlinearNode::Constant(0.05),
+        NonlinearNode::Multiply(7, 8), NonlinearNode::Add(5, 9)], 10);
+    let coupled_design = optimize_multiphysics_design(&MultiphysicsDesignProblem {
+        model: coupled_model, response: design_response,
+        design_variables: vec![MultiphysicsDesignVariable { parameter: 2,
+            bound: Bound { lower: Some(0.0), upper: Some(5.0) } }],
+    }, Default::default(), Default::default())?;
+    let multiphysics_case = ValidationCase::new("coupled steady adjoint design optimization", vec![
+        ValidationMetric::compare("multiphysics optimal design", coupled_design.design[0],
+            2.0979020979, tight),
+        ValidationMetric::compare("multiphysics state consistency",
+            coupled_design.state[0] - coupled_design.design[0] / 1.2, 0.0, tight),
+        ValidationMetric::compare("multiphysics design gradient", coupled_design.gradient[0],
+            0.0, ValidationTolerance::new(1e-6, 0.0)),
+    ]).classified("internal.multiphysics.design", "multiphysics-design",
+        ValidationTier::Standard);
+
     let first = crate::deterministic_perturbation(&[1.0, -2.0, 3.0], 42, 1e-6);
     let second = crate::deterministic_perturbation(&[1.0, -2.0, 3.0], 42, 1e-6);
     let perturbation_case = ValidationCase::new(
@@ -460,6 +508,7 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
         continuum_case,
         sensitivity_case,
         strengthening_case,
+        multiphysics_case,
         perturbation_case,
     ];
     cases.extend(crate::run_external_reference_validation()?);
@@ -474,11 +523,11 @@ mod tests {
     fn production_reference_program_passes() {
         let report = run_reference_validation().unwrap();
         assert!(report.passed(), "{report:#?}");
-        assert_eq!(report.cases.len(), 16);
+        assert_eq!(report.cases.len(), 17);
         assert_eq!(report.failure_count(), 0);
         assert!(report.maximum_normalized_error() <= 1.0);
         assert_eq!(report.for_tier(ValidationTier::Smoke).cases.len(), 4);
-        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 16);
+        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 17);
 
         let first = report.snapshot("rust", ValidationTier::Standard);
         let second = run_reference_validation()

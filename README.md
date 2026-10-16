@@ -203,6 +203,8 @@ forward/adjoint consistency diagnostics.
 Phase 58 selectively strengthens global MINLP relaxations with exact
 integer-hull secants for square atoms, reporting generated cuts while
 preserving certified global bounds.
+Phase 59 adds monolithic sparse multiphysics steady solves with named
+discipline diagnostics and adjoint-driven bounded design optimization.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

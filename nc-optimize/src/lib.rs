@@ -196,6 +196,12 @@ pub mod engineering_sensitivity;
 pub use engineering_sensitivity::{
     EngineeringResponseGradient, EngineeringResponseSensitivity, EngineeringSensitivityResult,
 };
+pub mod multiphysics_design;
+pub use multiphysics_design::{
+    optimize_multiphysics_design, MultiphysicsDesignProblem, MultiphysicsDesignResult,
+    MultiphysicsDesignVariable, MultiphysicsDiscipline, MultiphysicsModel,
+    MultiphysicsSteadyOptions, MultiphysicsSteadyResult, MultiphysicsSteadyTermination,
+};
 
 pub mod circuit;
 pub use circuit::{
