@@ -11,7 +11,8 @@ use crate::{
     ContinuumTriangle3, FemConstraint, FemNode2D, FemNodalLoad, LinearElasticContinuumMaterial,
     EngineeringElement, EngineeringEquation, EngineeringModel, EngineeringParameter,
     EngineeringPort, EngineeringResponseGradient, EngineeringUnknown, EngineeringUnknownRole,
-    NonlinearExpression, NonlinearNode,
+    minimize_global_minlp, GlobalMinlpOptions, GlobalMinlpProblem, NonlinearExpression,
+    NonlinearNode,
 };
 use crate::{
     ValidationCase, ValidationMetric, ValidationReport, ValidationTier, ValidationTolerance,
@@ -401,6 +402,26 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
     ]).classified("internal.engineering.adjoint", "engineering-sensitivity",
         ValidationTier::Standard);
 
+    let integer_square = NonlinearExpression::new(vec![
+        NonlinearNode::Parameter(0), NonlinearNode::Powf(0, 2.0),
+        NonlinearNode::Subtract(1, 0)], 2);
+    let strengthened = minimize_global_minlp(&GlobalMinlpProblem {
+        model: crate::NonlinearModel::objective(1,
+            vec![Bound { lower: Some(0.0), upper: Some(3.0) }], integer_square),
+        constraints: vec![], is_integer: vec![true],
+    }, GlobalMinlpOptions::default())?;
+    let strengthening_case = ValidationCase::new("integer-square envelope strengthening", vec![
+        ValidationMetric::compare("strengthened MINLP objective", strengthened.objective,
+            0.0, tight),
+        ValidationMetric::compare("integer envelope cuts generated",
+            strengthened.integer_envelope_cuts_generated as f64, 3.0,
+            ValidationTolerance::new(0.0, 0.0)),
+        ValidationMetric::compare("global certificate",
+            if strengthened.global_optimality_certified { 1.0 } else { 0.0 }, 1.0,
+            ValidationTolerance::new(0.0, 0.0)),
+    ]).classified("internal.minlp.integer-envelope", "global-mixed-integer-nonlinear",
+        ValidationTier::Standard);
+
     let first = crate::deterministic_perturbation(&[1.0, -2.0, 3.0], 42, 1e-6);
     let second = crate::deterministic_perturbation(&[1.0, -2.0, 3.0], 42, 1e-6);
     let perturbation_case = ValidationCase::new(
@@ -438,6 +459,7 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
         dae_case,
         continuum_case,
         sensitivity_case,
+        strengthening_case,
         perturbation_case,
     ];
     cases.extend(crate::run_external_reference_validation()?);
@@ -452,11 +474,11 @@ mod tests {
     fn production_reference_program_passes() {
         let report = run_reference_validation().unwrap();
         assert!(report.passed(), "{report:#?}");
-        assert_eq!(report.cases.len(), 15);
+        assert_eq!(report.cases.len(), 16);
         assert_eq!(report.failure_count(), 0);
         assert!(report.maximum_normalized_error() <= 1.0);
         assert_eq!(report.for_tier(ValidationTier::Smoke).cases.len(), 4);
-        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 15);
+        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 16);
 
         let first = report.snapshot("rust", ValidationTier::Standard);
         let second = run_reference_validation()

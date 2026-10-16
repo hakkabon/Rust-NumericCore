@@ -31,6 +31,8 @@ pub struct GlobalMinlpOptions {
     pub propagation_passes: usize,
     pub propagation_tolerance: f64,
     pub enable_rounding_heuristic: bool,
+    pub enable_integer_envelope_cuts: bool,
+    pub maximum_integer_envelope_cuts: usize,
     pub local_options: LbfgsOptions,
     pub sqp_options: SqpOptions,
 }
@@ -47,6 +49,8 @@ impl Default for GlobalMinlpOptions {
             propagation_passes: 8,
             propagation_tolerance: 1e-10,
             enable_rounding_heuristic: true,
+            enable_integer_envelope_cuts: true,
+            maximum_integer_envelope_cuts: 256,
             local_options: LbfgsOptions::default(),
             sqp_options: SqpOptions::default(),
         }
@@ -96,6 +100,7 @@ pub struct GlobalMinlpResult {
     pub heuristic_successes: usize,
     pub incumbents_found: usize,
     pub maximum_depth: usize,
+    pub integer_envelope_cuts_generated: usize,
     pub global_optimality_certified: bool,
     pub termination: GlobalMinlpTermination,
 }
@@ -153,6 +158,7 @@ where
     let (mut prune_propagation, mut passes, mut tightened) = (0, 0, 0);
     let (mut integer_branches, mut spatial_branches, mut local_solves) = (0, 0, 0);
     let (mut heuristic_attempts, mut heuristic_successes, mut incumbents, mut depth) = (0, 0, 0, 0);
+    let mut integer_envelope_cuts = 0;
     let (mut failures, mut cancelled, mut gap_reached) = (0, false, false);
     while !nodes.is_empty() && explored < options.max_nodes {
         let index = nodes
@@ -201,11 +207,23 @@ where
             prune_propagation += 1;
             continue;
         }
+        let relaxation = compile_relaxation(&spatial, &node.bounds)?;
+        let (relaxation, generated) = if options.enable_integer_envelope_cuts {
+            strengthen_integer_square_envelopes(
+                problem,
+                &node.bounds,
+                relaxation,
+                options.maximum_integer_envelope_cuts,
+            )?
+        } else {
+            (relaxation, 0)
+        };
+        integer_envelope_cuts += generated;
         let solution = RevisedSimplexSolver {
             max_iterations: options.simplex_iterations,
             tolerance: options.feasibility_tolerance.min(1e-9).max(1e-12),
         }
-        .solve(&compile_relaxation(&spatial, &node.bounds)?)?;
+        .solve(&relaxation)?;
         match solution.status {
             SolveStatus::Infeasible => {
                 prune_infeasible += 1;
@@ -360,9 +378,89 @@ where
         heuristic_successes,
         incumbents_found: incumbents,
         maximum_depth: depth,
+        integer_envelope_cuts_generated: integer_envelope_cuts,
         global_optimality_certified: certified,
         termination,
     })
+}
+
+fn strengthen_integer_square_envelopes(
+    problem: &GlobalMinlpProblem,
+    bounds: &[Bound],
+    relaxation: crate::Problem,
+    maximum_cuts: usize,
+) -> Result<(crate::Problem, usize), OptimizeError> {
+    if maximum_cuts == 0 {
+        return Ok((relaxation, 0));
+    }
+    let expressions = std::iter::once(problem.model.objective.as_ref().unwrap()).chain(
+        problem
+            .constraints
+            .iter()
+            .map(|constraint| &constraint.expression),
+    );
+    let mut cuts: Vec<(usize, usize, f64, f64)> = Vec::new();
+    let mut offset = problem.model.parameter_count;
+    'expressions: for expression in expressions {
+        for (node_index, node) in expression.nodes.iter().enumerate() {
+            let crate::NonlinearNode::Powf(operand, exponent) = node else {
+                continue;
+            };
+            if *exponent != 2.0 {
+                continue;
+            }
+            let crate::NonlinearNode::Parameter(parameter) = expression.nodes[*operand] else {
+                continue;
+            };
+            if !problem.is_integer[parameter] {
+                continue;
+            }
+            let mut k = bounds[parameter].lower.unwrap().ceil();
+            let last = bounds[parameter].upper.unwrap().floor();
+            while k < last {
+                if cuts.len() == maximum_cuts {
+                    break 'expressions;
+                }
+                let slope = 2.0 * k + 1.0;
+                let intercept = -k * (k + 1.0);
+                if !slope.is_finite() || !intercept.is_finite() {
+                    break;
+                }
+                cuts.push((parameter, offset + node_index, slope, intercept));
+                k += 1.0;
+            }
+        }
+        offset += expression.nodes.len();
+    }
+    if cuts.is_empty() {
+        return Ok((relaxation, 0));
+    }
+    let original_rows = relaxation.constraints.rows();
+    let mut coo =
+        nc_sparse::CooMatrix::new(original_rows + cuts.len(), relaxation.constraints.cols());
+    for (row, column, value) in relaxation.constraints.iter_entries() {
+        coo.push(row, column, value)?;
+    }
+    let mut row_bounds = relaxation.row_bounds;
+    for (index, &(parameter, square, slope, intercept)) in cuts.iter().enumerate() {
+        coo.push(original_rows + index, parameter, -slope)?;
+        coo.push(original_rows + index, square, 1.0)?;
+        row_bounds.push(Bound {
+            lower: Some(intercept),
+            upper: None,
+        });
+    }
+    let cut_count = cuts.len();
+    Ok((
+        crate::Problem {
+            objective: relaxation.objective,
+            constraints: coo.to_csr()?,
+            row_bounds,
+            var_bounds: relaxation.var_bounds,
+            is_integer: relaxation.is_integer,
+        },
+        cut_count,
+    ))
 }
 
 fn rounded_candidate(
@@ -558,5 +656,45 @@ mod tests {
         assert!((result.objective + 1.0).abs() < 1e-8);
         assert!(result.integer_branches > 0);
         assert!(result.global_optimality_certified);
+    }
+
+    #[test]
+    fn adds_integer_square_envelope_cuts() {
+        // x^2-x has continuous optimum -0.25 but integer optimum zero.
+        let expression = NonlinearExpression::new(
+            vec![
+                NonlinearNode::Parameter(0),
+                NonlinearNode::Powf(0, 2.0),
+                NonlinearNode::Subtract(1, 0),
+            ],
+            2,
+        );
+        let problem = GlobalMinlpProblem {
+            model: NonlinearModel::objective(
+                1,
+                vec![Bound {
+                    lower: Some(0.0),
+                    upper: Some(3.0),
+                }],
+                expression,
+            ),
+            constraints: vec![],
+            is_integer: vec![true],
+        };
+        let result = minimize_global_minlp(&problem, GlobalMinlpOptions::default()).unwrap();
+        assert!(result.objective.abs() < 1e-10);
+        assert!(result.integer_envelope_cuts_generated >= 3);
+        assert!(result.global_optimality_certified);
+        let unstrengthened = minimize_global_minlp(
+            &problem,
+            GlobalMinlpOptions {
+                enable_integer_envelope_cuts: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(unstrengthened.integer_envelope_cuts_generated, 0);
+        assert!(unstrengthened.objective.abs() < 1e-10);
+        assert!(result.nodes_explored < unstrengthened.nodes_explored);
     }
 }

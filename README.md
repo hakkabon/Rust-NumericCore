@@ -200,6 +200,9 @@ element-versus-global energy diagnostics.
 Phase 57 adds sparse implicit forward engineering sensitivities and discrete
 adjoints, including effective DAE tangents, direct response dependence, and
 forward/adjoint consistency diagnostics.
+Phase 58 selectively strengthens global MINLP relaxations with exact
+integer-hull secants for square atoms, reporting generated cuts while
+preserving certified global bounds.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's
