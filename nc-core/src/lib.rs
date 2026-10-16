@@ -18,10 +18,16 @@ mod dtype;
 mod layout;
 mod shape;
 
+pub mod api;
+
 pub use buffer::Buffer;
 pub use dtype::DType;
 pub use layout::{Layout, Order};
 pub use shape::Shape;
+pub use api::{
+    capability_by_id, supports, ApiStability, Capability, API_COMPATIBILITY_EPOCH,
+    API_MANIFEST_SCHEMA_VERSION, CAPABILITIES,
+};
 
 /// Crate-wide error type. Kept small and FFI-friendly — see
 /// `nc-ffi` for how this maps to C-compatible error codes.

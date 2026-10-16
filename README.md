@@ -205,6 +205,9 @@ integer-hull secants for square atoms, reporting generated cuts while
 preserving certified global bounds.
 Phase 59 adds monolithic sparse multiphysics steady solves with named
 discipline diagnostics and adjoint-driven bounded design optimization.
+Phase 60 establishes the 1.0 compatibility boundary through a shared,
+machine-readable capability manifest, explicit stability tiers, coherent crate
+version metadata, and contract tests aligned with Swift-NumericCore.
 
 See the parent project's full architecture write-up and ADRs in
 `Swift-NumericCore`'s `docs/` for the reasoning behind this repo's

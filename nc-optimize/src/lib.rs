@@ -14,6 +14,11 @@
 use nc_sparse::CsrMatrix;
 use thiserror::Error;
 
+pub use nc_core::{
+    capability_by_id, supports, ApiStability, Capability, API_COMPATIBILITY_EPOCH,
+    API_MANIFEST_SCHEMA_VERSION, CAPABILITIES,
+};
+
 pub mod simplex;
 pub use simplex::RevisedSimplexSolver;
 
@@ -487,8 +492,13 @@ pub trait Solver {
 /// Placeholder solver so the pipeline (parse → presolve → `Problem` →
 /// `Solver` → `Solution`) can be built and tested end to end before a
 /// real simplex/interior-point implementation lands.
+#[deprecated(
+    since = "0.34.0",
+    note = "use RevisedSimplexSolver, InteriorPointSolver, or ProductionLinearSolver"
+)]
 pub struct StubSolver;
 
+#[allow(deprecated)]
 impl Solver for StubSolver {
     fn name(&self) -> &'static str {
         "stub"
@@ -504,6 +514,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(deprecated)]
     fn stub_solver_reports_not_implemented() {
         let problem = Problem {
             objective: vec![1.0],

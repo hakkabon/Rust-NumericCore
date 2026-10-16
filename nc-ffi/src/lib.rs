@@ -64,6 +64,53 @@ pub use nonlinear::*;
 
 uniffi::setup_scaffolding!();
 
+/// FFI representation of the cross-language API stability vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiApiStability {
+    Experimental,
+    Provisional,
+    Stable,
+}
+
+/// One capability advertised by the linked Rust binary.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiCapability {
+    pub identifier: String,
+    pub stability: FfiApiStability,
+    pub contract_version: u32,
+}
+
+/// Runtime identity and compatibility metadata for the linked Rust binary.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiApiManifest {
+    pub rust_package_version: String,
+    pub schema_version: u32,
+    pub compatibility_epoch: u32,
+    pub capabilities: Vec<FfiCapability>,
+}
+
+/// Report the exact API contract implemented by this binary.
+#[uniffi::export]
+pub fn numeric_core_api_manifest() -> FfiApiManifest {
+    FfiApiManifest {
+        rust_package_version: env!("CARGO_PKG_VERSION").to_owned(),
+        schema_version: nc_core::API_MANIFEST_SCHEMA_VERSION,
+        compatibility_epoch: nc_core::API_COMPATIBILITY_EPOCH,
+        capabilities: nc_core::CAPABILITIES
+            .iter()
+            .map(|capability| FfiCapability {
+                identifier: capability.identifier.to_owned(),
+                stability: match capability.stability {
+                    nc_core::ApiStability::Experimental => FfiApiStability::Experimental,
+                    nc_core::ApiStability::Provisional => FfiApiStability::Provisional,
+                    nc_core::ApiStability::Stable => FfiApiStability::Stable,
+                },
+                contract_version: capability.contract_version,
+            })
+            .collect(),
+    }
+}
+
 /// Errors that can cross the FFI boundary. Deliberately flat and
 /// string-carrying rather than mirroring each source crate's error type
 /// exactly — UniFFI generates a Swift `enum FfiError: Error` from this,
@@ -1072,6 +1119,20 @@ impl FfiVectorF32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_manifest_exposes_binary_identity_and_contract() {
+        let manifest = numeric_core_api_manifest();
+        assert_eq!(manifest.rust_package_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.compatibility_epoch, 1);
+        assert_eq!(manifest.capabilities.len(), nc_core::CAPABILITIES.len());
+        assert_eq!(manifest.capabilities[0].identifier, "ampl-modeling");
+        assert_eq!(
+            manifest.capabilities.last().unwrap().identifier,
+            "sparse-linear-algebra"
+        );
+    }
 
     #[test]
     fn matmul_f64_identity() {
