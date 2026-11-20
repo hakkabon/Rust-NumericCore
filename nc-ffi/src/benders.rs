@@ -11,6 +11,20 @@ pub struct FfiBendersScenario {
     pub coupling: FfiCsrMatrixF64,
 }
 
+pub(crate) fn to_benders_scenario(
+    scenario: FfiBendersScenario,
+) -> Result<opt::BendersScenario, FfiError> {
+    Ok(opt::BendersScenario {
+        id: opt::LpSubproblemID {
+            name: scenario.id.name,
+            scenario: scenario.id.scenario,
+        },
+        probability: scenario.probability,
+        recourse: to_domain_problem(scenario.recourse)?,
+        coupling: to_csr_f64(scenario.coupling)?,
+    })
+}
+
 #[derive(uniffi::Enum)]
 pub enum FfiBendersCutStrategy {
     Single,
@@ -90,17 +104,7 @@ pub fn solve_benders_decomposition(
     let first_stage = to_domain_problem(first_stage)?;
     let scenarios = scenarios
         .into_iter()
-        .map(|scenario| {
-            Ok(opt::BendersScenario {
-                id: opt::LpSubproblemID {
-                    name: scenario.id.name,
-                    scenario: scenario.id.scenario,
-                },
-                probability: scenario.probability,
-                recourse: to_domain_problem(scenario.recourse)?,
-                coupling: to_csr_f64(scenario.coupling)?,
-            })
-        })
+        .map(to_benders_scenario)
         .collect::<Result<Vec<_>, FfiError>>()?;
     let size = |value| {
         usize::try_from(value).map_err(|_| FfiError::SolverError {

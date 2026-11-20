@@ -490,7 +490,7 @@ fn validate(problem: &BendersProblem, options: BendersOptions) -> Result<Vec<f64
 
 type Floor = Result<f64, BendersTermination>;
 
-fn recourse_floor(
+pub(crate) fn recourse_floor(
     first: &Problem,
     scenario: &BendersScenario,
     solver: &RevisedSimplexSolver,
@@ -700,7 +700,7 @@ fn solve_scenarios(
     })
 }
 
-fn solve_lp(
+pub(crate) fn solve_lp(
     workspace: &mut LpWorkspace,
     solver: &RevisedSimplexSolver,
     tolerance: f64,
@@ -720,7 +720,7 @@ fn solve_lp(
     Ok(report)
 }
 
-struct Affine {
+pub(crate) struct Affine {
     constant: f64,
     slope: Vec<f64>,
 }
@@ -746,7 +746,7 @@ impl Affine {
         Ok(sum)
     }
 
-    fn cut(
+    pub(crate) fn cut(
         self,
         source: LpSubproblemID,
         iteration: usize,
@@ -775,7 +775,7 @@ impl Affine {
     }
 }
 
-fn affine(s: &BendersScenario, row: &[f64], column: &[f64]) -> Result<Affine, OptimizeError> {
+pub(crate) fn affine(s: &BendersScenario, row: &[f64], column: &[f64]) -> Result<Affine, OptimizeError> {
     let constant = box_minimum(row, &s.recourse.row_bounds)
         .zip(box_minimum(column, &s.recourse.var_bounds))
         .map(|(row, col)| row + col)
@@ -809,7 +809,7 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(a, b)| a * b).sum()
 }
 
-fn violation(cut: &DecompositionCut, x: &[f64]) -> Result<f64, OptimizeError> {
+pub(crate) fn violation(cut: &DecompositionCut, x: &[f64]) -> Result<f64, OptimizeError> {
     let activity: f64 = cut.entries.iter().map(|&(i, value)| value * x[i]).sum();
     let excess = activity - cut.upper;
     if !excess.is_finite() {

@@ -66,6 +66,7 @@ jobs:
           grep -q 'public protocol FfiLpWorkspaceProtocol' "${BINDINGS}"
           grep -q 'func verifyLpFarkasEvidence' "${BINDINGS}"
           grep -q 'func solveBendersDecomposition' "${BINDINGS}"
+          grep -q 'func solveIntegerBendersDecomposition' "${BINDINGS}"
 
       - name: Compute checksum
         id: checksum

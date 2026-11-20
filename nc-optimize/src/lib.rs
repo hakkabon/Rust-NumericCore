@@ -24,6 +24,13 @@ pub use simplex::RevisedSimplexSolver;
 pub mod lp_decomposition;
 pub mod decomposition_cuts;
 pub mod benders;
+mod benders_tree;
+pub mod integer_benders;
+pub use integer_benders::{
+    solve_integer_benders, solve_logic_benders, IntegerBendersOptions, IntegerBendersProblem,
+    IntegerBendersResult, IntegerBendersScenario, IntegerBendersTermination, LogicBendersEvaluation,
+    LogicBendersScenario,
+};
 pub use benders::{
     solve_benders, BendersCutStrategy, BendersIncumbent, BendersIteration, BendersOptions,
     BendersProblem, BendersRecourseSolution, BendersResult, BendersScenario, BendersTermination,

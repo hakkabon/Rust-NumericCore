@@ -65,6 +65,8 @@ mod lp_decomposition;
 pub use lp_decomposition::*;
 mod benders;
 pub use benders::*;
+mod integer_benders;
+pub use integer_benders::*;
 
 uniffi::setup_scaffolding!();
 
