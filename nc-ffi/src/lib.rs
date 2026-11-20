@@ -69,6 +69,8 @@ mod integer_benders;
 pub use integer_benders::*;
 mod stochastic;
 pub use stochastic::*;
+mod nonlinear_decomposition;
+pub use nonlinear_decomposition::*;
 
 uniffi::setup_scaffolding!();
 

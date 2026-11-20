@@ -69,6 +69,7 @@ jobs:
           grep -q 'func solveIntegerBendersDecomposition' "${BINDINGS}"
           grep -q 'func solveScenarioTree' "${BINDINGS}"
           grep -q 'func runProgressiveHedging' "${BINDINGS}"
+          grep -q 'func solveNonlinearDecomposition' "${BINDINGS}"
 
       - name: Compute checksum
         id: checksum

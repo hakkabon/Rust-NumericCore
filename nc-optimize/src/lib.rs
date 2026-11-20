@@ -29,6 +29,12 @@ pub mod integer_benders;
 pub mod stochastic;
 pub mod scenario_sampling;
 pub mod progressive_hedging;
+pub mod nonlinear_decomposition;
+pub use nonlinear_decomposition::{
+    solve_nonlinear_decomposition, NonlinearDecompositionOptions, NonlinearDecompositionProblem,
+    NonlinearDecompositionResult, NonlinearDecompositionTermination, NonlinearRecourseBlock,
+    NonlinearRecourseSolution, NonlinearDecompositionIncumbent,
+};
 pub use progressive_hedging::{
     solve_progressive_hedging, HedgingCheckpoint, HedgingTermination, ProgressiveHedgingOptions,
     ProgressiveHedgingResult,

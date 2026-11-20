@@ -545,14 +545,14 @@ fn count(value: u64, name: &str) -> Result<usize, FfiError> {
     })
 }
 
-fn bound(value: crate::FfiBound) -> Bound {
+pub(crate) fn bound(value: crate::FfiBound) -> Bound {
     Bound {
         lower: value.lower,
         upper: value.upper,
     }
 }
 
-fn expression(value: FfiNonlinearExpression) -> NonlinearExpression {
+pub(crate) fn expression(value: FfiNonlinearExpression) -> NonlinearExpression {
     let nodes = value
         .nodes
         .into_iter()

@@ -248,7 +248,16 @@ impl LpWorkspace {
                     &report.solution.variable_values,
                     &multipliers,
                     evidence_tolerance,
-                );
+                )
+                .or_else(|| {
+                    let adjusted = adjust_upper_support(&self.problem, &multipliers)?;
+                    verify_lp_dual(
+                        &self.problem,
+                        &report.solution.variable_values,
+                        &adjusted,
+                        evidence_tolerance,
+                    )
+                });
             }
             SolveStatus::Infeasible => {
                 report.infeasibility = verify_lp_farkas(
@@ -312,6 +321,23 @@ pub fn verify_lp_dual(
         objective_bound: bound,
         absolute_gap: gap,
     })
+}
+
+// A small negative reduced cost on a one-sided epigraph leaves its support
+// unbounded. Scale the witness before re-auditing it against the original LP.
+fn adjust_upper_support(problem: &Problem, multipliers: &[f64]) -> Option<Vec<f64>> {
+    let roundoff = 64.0 * f64::EPSILON;
+    let mut scale = 1.0_f64;
+    let at_y = problem.constraints.transpose_spmv(multipliers).ok()?;
+    for ((&c, a), bound) in problem.objective.iter().zip(at_y).zip(&problem.var_bounds) {
+        if bound.upper.is_none() && a > c {
+            if bound.lower.is_none() || c <= 0.0 || (a - c) > roundoff * c {
+                return None;
+            }
+            scale = scale.min((c / a) * (1.0 - roundoff));
+        }
+    }
+    (scale < 1.0).then(|| multipliers.iter().map(|y| scale * y).collect())
 }
 
 /// Verify a separating linear functional against the original row/variable boxes.
@@ -378,7 +404,7 @@ pub fn verify_lp_unbounded_ray(
     })
 }
 
-fn accumulate_support(
+pub(crate) fn accumulate_support(
     sum: &mut f64,
     scale: &mut f64,
     coefficients: &[f64],
