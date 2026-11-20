@@ -71,6 +71,8 @@ mod stochastic;
 pub use stochastic::*;
 mod nonlinear_decomposition;
 pub use nonlinear_decomposition::*;
+mod sparse_factorization;
+pub use sparse_factorization::*;
 
 uniffi::setup_scaffolding!();
 

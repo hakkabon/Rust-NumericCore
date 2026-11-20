@@ -70,6 +70,8 @@ jobs:
           grep -q 'func solveScenarioTree' "${BINDINGS}"
           grep -q 'func runProgressiveHedging' "${BINDINGS}"
           grep -q 'func solveNonlinearDecomposition' "${BINDINGS}"
+          grep -q 'func analyzeSparseFactorization' "${BINDINGS}"
+          grep -q 'public protocol FfiSparseFactorizationProtocol' "${BINDINGS}"
 
       - name: Compute checksum
         id: checksum

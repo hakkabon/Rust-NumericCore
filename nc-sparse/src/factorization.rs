@@ -113,8 +113,11 @@ impl SparseSymbolicAnalysis {
         if matrix.rows() != self.size || matrix.cols() != self.size {
             return Err(SparseDirectError::PatternMismatch);
         }
-        let pattern: Vec<_> = matrix.iter_entries().map(|(r, c, _)| (r, c)).collect();
-        if pattern != self.pattern {
+        if !matrix
+            .iter_entries()
+            .map(|(r, c, _)| (r, c))
+            .eq(self.pattern.iter().copied())
+        {
             return Err(SparseDirectError::PatternMismatch);
         }
         Ok(())
@@ -126,30 +129,43 @@ fn symbolic_eliminate(
     prescribed: Option<Vec<usize>>,
 ) -> (Vec<usize>, usize) {
     let n = graph.len();
-    let mut active = vec![true; n];
+    // This index contains one entry per active vertex. Updating its key only
+    // when neighbors change avoids a full scan for every minimum-degree pivot.
+    let mut degrees: BTreeSet<_> = if prescribed.is_none() {
+        graph
+            .iter()
+            .enumerate()
+            .map(|(v, edges)| (edges.len(), v))
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
     let mut order = Vec::with_capacity(n);
     let mut estimate = n;
     for step in 0..n {
-        let vertex = prescribed.as_ref().map(|p| p[step]).unwrap_or_else(|| {
-            (0..n)
-                .filter(|&v| active[v])
-                .min_by_key(|&v| (graph[v].iter().filter(|&&u| active[u]).count(), v))
-                .unwrap()
-        });
-        let neighbors: Vec<_> = graph[vertex]
-            .iter()
-            .copied()
-            .filter(|&u| active[u])
-            .collect();
+        let vertex = prescribed
+            .as_ref()
+            .map(|p| p[step])
+            .unwrap_or_else(|| degrees.pop_first().unwrap().1);
+        let neighbors = std::mem::take(&mut graph[vertex]);
         estimate += 2 * neighbors.len();
+        if prescribed.is_none() {
+            for &neighbor in &neighbors {
+                degrees.remove(&(graph[neighbor].len(), neighbor));
+            }
+        }
+        let neighbors: Vec<_> = neighbors.into_iter().collect();
         for (position, &left) in neighbors.iter().enumerate() {
             for &right in &neighbors[position + 1..] {
                 graph[left].insert(right);
                 graph[right].insert(left);
             }
             graph[left].remove(&vertex);
+            if prescribed.is_none() {
+                // All newly inserted neighbors of left are now present.
+                degrees.insert((graph[left].len(), left));
+            }
         }
-        active[vertex] = false;
         order.push(vertex);
     }
     (order, estimate)
@@ -233,6 +249,11 @@ impl SparseLuFactorization {
         Ok(())
     }
 
+    /// Update values in the original CSR storage order.
+    pub fn refactor_values(&mut self, values: Vec<f64>) -> Result<(), SparseDirectError> {
+        self.refactor(&self.matrix.with_values(values)?)
+    }
+
     pub fn solve(&self, rhs: &[f64]) -> Result<Vec<f64>, SparseDirectError> {
         validate_rhs(rhs, self.analysis.size)?;
         let mut ordered: Vec<_> = self.analysis.permutation.iter().map(|&i| rhs[i]).collect();
@@ -260,7 +281,7 @@ impl SparseLuFactorization {
         for (ordered_index, &original_index) in self.analysis.permutation.iter().enumerate() {
             solution[original_index] = ordered[ordered_index];
         }
-        Ok(solution)
+        finite_solution(solution)
     }
 
     pub fn solve_multiple(
@@ -270,22 +291,52 @@ impl SparseLuFactorization {
         right_hand_sides.iter().map(|rhs| self.solve(rhs)).collect()
     }
 
-    pub fn solve_refined(&self, rhs: &[f64]) -> Result<SparseRefinedReport, SparseDirectError> {
-        let mut solution = self.solve(rhs)?;
-        let mut steps = 0;
-        for _ in 0..self.options.refinement_steps {
-            let residual = residual(&self.matrix, rhs, &solution)?;
-            let error = backward_error(&self.matrix, rhs, &solution, &residual);
-            if error <= self.options.refinement_tolerance {
-                break;
+    /// Solve Aᵀx = b using the stored row pivots and symbolic permutation.
+    pub fn solve_transpose(&self, rhs: &[f64]) -> Result<Vec<f64>, SparseDirectError> {
+        validate_rhs(rhs, self.analysis.size)?;
+        let mut x: Vec<_> = self.analysis.permutation.iter().map(|&i| rhs[i]).collect();
+        // Uᵀ followed by Lᵀ. Scatter updates traverse only stored entries.
+        for (row, factor) in self.factors.iter().enumerate() {
+            x[row] /= factor[&row];
+            for (&column, &value) in factor.range((row + 1)..) {
+                x[column] -= value * x[row];
             }
-            let correction = self.solve(&residual)?;
-            for (x, delta) in solution.iter_mut().zip(correction) {
-                *x += delta;
-            }
-            steps += 1;
         }
-        make_report(&self.matrix, rhs, solution, steps, self.diagnostics.clone())
+        for (row, factor) in self.factors.iter().enumerate().rev() {
+            for (&column, &value) in factor.range(..row) {
+                x[column] -= value * x[row];
+            }
+        }
+        let mut solution = vec![0.0; x.len()];
+        for (row, &pivoted) in self.row_permutation.iter().enumerate() {
+            solution[self.analysis.permutation[pivoted]] = x[row];
+        }
+        finite_solution(solution)
+    }
+
+    pub fn solve_transpose_refined(
+        &self,
+        rhs: &[f64],
+    ) -> Result<SparseRefinedReport, SparseDirectError> {
+        refine(
+            &self.matrix,
+            rhs,
+            &self.options,
+            &self.diagnostics,
+            true,
+            |r| self.solve_transpose(r),
+        )
+    }
+
+    pub fn solve_refined(&self, rhs: &[f64]) -> Result<SparseRefinedReport, SparseDirectError> {
+        refine(
+            &self.matrix,
+            rhs,
+            &self.options,
+            &self.diagnostics,
+            false,
+            |r| self.solve(r),
+        )
     }
 }
 
@@ -377,6 +428,192 @@ fn factor_lu(
     Ok((rows, row_permutation, diagnostics))
 }
 
+/// Reusable sparse LLᵀ factorization for symmetric positive definite systems.
+/// Numeric elimination updates only the active neighbors of a pivot.
+#[derive(Debug, Clone)]
+pub struct SparseCholeskyFactorization {
+    analysis: SparseSymbolicAnalysis,
+    options: SparseNumericOptions,
+    factor: CholeskyColumns,
+    matrix: CsrMatrix<f64>,
+    diagnostics: SparseFactorizationDiagnostics,
+}
+
+#[derive(Debug, Clone)]
+struct CholeskyColumns {
+    diagonal: Vec<f64>,
+    lower: Vec<Vec<(usize, f64)>>,
+}
+
+impl SparseCholeskyFactorization {
+    pub fn factor(
+        matrix: &CsrMatrix<f64>,
+        ordering: SparseOrdering,
+        options: SparseNumericOptions,
+    ) -> Result<Self, SparseDirectError> {
+        let analysis = SparseSymbolicAnalysis::analyze(matrix, ordering)?;
+        Self::factor_with_analysis(matrix, analysis, options)
+    }
+
+    pub fn factor_with_analysis(
+        matrix: &CsrMatrix<f64>,
+        analysis: SparseSymbolicAnalysis,
+        options: SparseNumericOptions,
+    ) -> Result<Self, SparseDirectError> {
+        options.validate()?;
+        analysis.validate_pattern(matrix)?;
+        let (factor, diagnostics) = cholesky_columns(matrix, &analysis, &options)?;
+        Ok(Self {
+            analysis,
+            options,
+            factor,
+            matrix: matrix.clone(),
+            diagnostics,
+        })
+    }
+
+    pub fn symbolic_analysis(&self) -> &SparseSymbolicAnalysis {
+        &self.analysis
+    }
+
+    pub fn diagnostics(&self) -> &SparseFactorizationDiagnostics {
+        &self.diagnostics
+    }
+
+    pub fn refactor(&mut self, matrix: &CsrMatrix<f64>) -> Result<(), SparseDirectError> {
+        self.analysis.validate_pattern(matrix)?;
+        let (factor, diagnostics) = cholesky_columns(matrix, &self.analysis, &self.options)?;
+        self.factor = factor;
+        self.matrix = matrix.clone();
+        self.diagnostics = diagnostics;
+        Ok(())
+    }
+
+    /// Update values in the original CSR storage order.
+    pub fn refactor_values(&mut self, values: Vec<f64>) -> Result<(), SparseDirectError> {
+        self.refactor(&self.matrix.with_values(values)?)
+    }
+
+    pub fn solve(&self, rhs: &[f64]) -> Result<Vec<f64>, SparseDirectError> {
+        validate_rhs(rhs, self.analysis.size)?;
+        let mut x: Vec<_> = self.analysis.permutation.iter().map(|&i| rhs[i]).collect();
+        for (j, column) in self.factor.lower.iter().enumerate() {
+            x[j] /= self.factor.diagonal[j];
+            for &(i, v) in column {
+                x[i] -= v * x[j];
+            }
+        }
+        for (j, column) in self.factor.lower.iter().enumerate().rev() {
+            let known: f64 = column.iter().map(|&(i, v)| v * x[i]).sum();
+            x[j] = (x[j] - known) / self.factor.diagonal[j];
+        }
+        let mut solution = vec![0.0; x.len()];
+        for (j, &original) in self.analysis.permutation.iter().enumerate() {
+            solution[original] = x[j];
+        }
+        finite_solution(solution)
+    }
+
+    pub fn solve_multiple(
+        &self,
+        right_hand_sides: &[Vec<f64>],
+    ) -> Result<Vec<Vec<f64>>, SparseDirectError> {
+        right_hand_sides.iter().map(|rhs| self.solve(rhs)).collect()
+    }
+
+    pub fn solve_refined(&self, rhs: &[f64]) -> Result<SparseRefinedReport, SparseDirectError> {
+        refine(
+            &self.matrix,
+            rhs,
+            &self.options,
+            &self.diagnostics,
+            false,
+            |r| self.solve(r),
+        )
+    }
+
+    pub fn solve_transpose_refined(
+        &self,
+        rhs: &[f64],
+    ) -> Result<SparseRefinedReport, SparseDirectError> {
+        refine(
+            &self.matrix,
+            rhs,
+            &self.options,
+            &self.diagnostics,
+            true,
+            |r| self.solve(r),
+        )
+    }
+}
+
+fn cholesky_columns(
+    matrix: &CsrMatrix<f64>,
+    analysis: &SparseSymbolicAnalysis,
+    options: &SparseNumericOptions,
+) -> Result<(CholeskyColumns, SparseFactorizationDiagnostics), SparseDirectError> {
+    let source = matrix_rows(matrix)?;
+    check_symmetric(&source)?;
+    let n = source.len();
+    let mut rows = vec![BTreeMap::new(); n];
+    let mut maximum_input = 0.0_f64;
+    for (i, row) in source.iter().enumerate() {
+        let a = analysis.inverse_permutation[i];
+        for (&j, &v) in row {
+            let b = analysis.inverse_permutation[j];
+            let mean = v.midpoint(source[j].get(&i).copied().unwrap_or(0.0));
+            rows[a.min(b)].insert(a.max(b), mean);
+            maximum_input = maximum_input.max(v.abs());
+        }
+    }
+    let threshold = maximum_input * options.pivot_tolerance;
+    let mut factor = CholeskyColumns {
+        diagonal: Vec::with_capacity(n),
+        lower: Vec::with_capacity(n),
+    };
+    let mut minimum_pivot = f64::INFINITY;
+    let mut maximum_active = maximum_input;
+    for k in 0..n {
+        let mut active = std::mem::take(&mut rows[k]);
+        let pivot = active.remove(&k).unwrap_or(0.0);
+        if pivot <= threshold {
+            return Err(SparseDirectError::NotPositiveDefinite { pivot: k });
+        }
+        minimum_pivot = minimum_pivot.min(pivot);
+        let diagonal = pivot.sqrt();
+        let column: Vec<_> = active
+            .into_iter()
+            .filter(|(_, v)| v.abs() > options.drop_tolerance)
+            .map(|(i, v)| (i, v / diagonal))
+            .collect();
+        for (position, &(i, li)) in column.iter().enumerate() {
+            for &(j, lj) in &column[position..] {
+                let next = rows[i].get(&j).copied().unwrap_or(0.0) - li * lj;
+                if !next.is_finite() {
+                    return Err(SparseDirectError::InvalidNumericInput);
+                }
+                maximum_active = maximum_active.max(next.abs());
+                if i != j && next.abs() <= options.drop_tolerance {
+                    rows[i].remove(&j);
+                } else {
+                    rows[i].insert(j, next);
+                }
+            }
+        }
+        factor.diagonal.push(diagonal);
+        factor.lower.push(column);
+    }
+    let nnz = n + factor.lower.iter().map(Vec::len).sum::<usize>();
+    let diagnostics = diagnostics(
+        analysis,
+        nnz,
+        minimum_pivot,
+        maximum_active / maximum_input.max(f64::MIN_POSITIVE),
+        0,
+    );
+    Ok((factor, diagnostics))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SparseInertia {
     pub positive: usize,
@@ -386,16 +623,41 @@ pub struct SparseInertia {
 
 #[derive(Debug, Clone)]
 enum DiagonalBlock {
-    One {
-        index: usize,
-        value: f64,
-    },
-    Two {
-        index: usize,
-        a: f64,
-        b: f64,
-        c: f64,
-    },
+    One { index: usize, value: f64 },
+    Two { index: usize, pivot: SymmetricPivot },
+}
+
+/// A symmetric 2×2 pivot normalized before forming its determinant.
+#[derive(Debug, Clone, Copy)]
+struct SymmetricPivot {
+    scale: f64,
+    a: f64,
+    b: f64,
+    c: f64,
+    determinant: f64,
+}
+
+impl SymmetricPivot {
+    fn new(a: f64, b: f64, c: f64) -> Self {
+        let scale = a.abs().max(b.abs()).max(c.abs());
+        let (a, b, c) = (a / scale, b / scale, c / scale);
+        Self {
+            scale,
+            a,
+            b,
+            c,
+            determinant: a.mul_add(c, -(b * b)),
+        }
+    }
+
+    fn solve(self, first: f64, second: f64) -> (f64, f64) {
+        let x = first / self.scale;
+        let y = second / self.scale;
+        (
+            (self.c * x - self.b * y) / self.determinant,
+            (self.a * y - self.b * x) / self.determinant,
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -460,6 +722,11 @@ impl SparseLdlt {
         self.inertia = inertia;
         Ok(())
     }
+
+    /// Update values in the original CSR storage order.
+    pub fn refactor_values(&mut self, values: Vec<f64>) -> Result<(), SparseDirectError> {
+        self.refactor(&self.matrix.with_values(values)?)
+    }
     pub fn solve(&self, rhs: &[f64]) -> Result<Vec<f64>, SparseDirectError> {
         validate_rhs(rhs, self.analysis.size)?;
         let symbolically_ordered: Vec<_> =
@@ -479,20 +746,15 @@ impl SparseLdlt {
         for block in &self.blocks {
             match *block {
                 DiagonalBlock::One { index, value } => x[index] /= value,
-                DiagonalBlock::Two { index, a, b, c } => {
-                    let determinant = a * c - b * b;
-                    let first = x[index];
-                    let second = x[index + 1];
-                    x[index] = (c * first - b * second) / determinant;
-                    x[index + 1] = (-b * first + a * second) / determinant;
+                DiagonalBlock::Two { index, pivot } => {
+                    (x[index], x[index + 1]) = pivot.solve(x[index], x[index + 1]);
                 }
             }
         }
-        for row in (0..n).rev() {
-            let contribution: f64 = ((row + 1)..n)
-                .filter_map(|r| self.lower[r].get(&row).map(|v| v * x[r]))
-                .sum();
-            x[row] -= contribution;
+        for (row, factor) in self.lower.iter().enumerate().rev() {
+            for (&column, &value) in factor.range(..row) {
+                x[column] -= value * x[row];
+            }
         }
         let mut after_numeric = vec![0.0; n];
         for (i, &prior) in self.numeric_permutation.iter().enumerate() {
@@ -502,7 +764,7 @@ impl SparseLdlt {
         for (i, &original) in self.analysis.permutation.iter().enumerate() {
             solution[original] = after_numeric[i];
         }
-        Ok(solution)
+        finite_solution(solution)
     }
     pub fn solve_multiple(
         &self,
@@ -511,21 +773,28 @@ impl SparseLdlt {
         right_hand_sides.iter().map(|rhs| self.solve(rhs)).collect()
     }
     pub fn solve_refined(&self, rhs: &[f64]) -> Result<SparseRefinedReport, SparseDirectError> {
-        let mut solution = self.solve(rhs)?;
-        let mut steps = 0;
-        for _ in 0..self.options.refinement_steps {
-            let r = residual(&self.matrix, rhs, &solution)?;
-            if backward_error(&self.matrix, rhs, &solution, &r) <= self.options.refinement_tolerance
-            {
-                break;
-            }
-            let correction = self.solve(&r)?;
-            for (x, d) in solution.iter_mut().zip(correction) {
-                *x += d;
-            }
-            steps += 1;
-        }
-        make_report(&self.matrix, rhs, solution, steps, self.diagnostics.clone())
+        refine(
+            &self.matrix,
+            rhs,
+            &self.options,
+            &self.diagnostics,
+            false,
+            |r| self.solve(r),
+        )
+    }
+
+    pub fn solve_transpose_refined(
+        &self,
+        rhs: &[f64],
+    ) -> Result<SparseRefinedReport, SparseDirectError> {
+        refine(
+            &self.matrix,
+            rhs,
+            &self.options,
+            &self.diagnostics,
+            true,
+            |r| self.solve(r),
+        )
     }
 }
 
@@ -549,7 +818,14 @@ fn factor_ldlt(
     for original_row in 0..n {
         let row = analysis.inverse_permutation[original_row];
         for (&original_column, &value) in &source[original_row] {
-            active[row].insert(analysis.inverse_permutation[original_column], value);
+            let column = analysis.inverse_permutation[original_column];
+            let transpose = source[original_column]
+                .get(&original_row)
+                .copied()
+                .unwrap_or(0.0);
+            let mean = value.midpoint(transpose);
+            active[row].insert(column, mean);
+            active[column].insert(row, mean);
             maximum_input = maximum_input.max(value.abs());
         }
     }
@@ -571,8 +847,8 @@ fn factor_ldlt(
             if d > best_diag.1 {
                 best_diag = (i, d);
             }
-            for j in i + 1..n {
-                let v = active[i].get(&j).copied().unwrap_or(0.0).abs();
+            for (&j, &value) in active[i].range((i + 1)..) {
+                let v = value.abs();
                 if v > best_off.2 {
                     best_off = (i, j, v);
                 }
@@ -589,16 +865,19 @@ fn factor_ldlt(
             }
             let d = active[k].get(&k).copied().unwrap_or(0.0);
             minimum_pivot = minimum_pivot.min(d.abs());
-            for i in k + 1..n {
-                let l = active[i].get(&k).copied().unwrap_or(0.0) / d;
+            let mut neighbors = Vec::new();
+            for (&i, &v) in active[k].range((k + 1)..) {
+                let l = v / d;
+                if !l.is_finite() {
+                    return Err(SparseDirectError::InvalidNumericInput);
+                }
                 if l.abs() > options.drop_tolerance {
                     lower[i].insert(k, l);
+                    neighbors.push((i, l));
                 }
             }
-            for i in k + 1..n {
-                let li = lower[i].get(&k).copied().unwrap_or(0.0);
-                for j in i..n {
-                    let lj = lower[j].get(&k).copied().unwrap_or(0.0);
+            for (position, &(i, li)) in neighbors.iter().enumerate() {
+                for &(j, lj) in &neighbors[position..] {
                     update_symmetric(&mut active, i, j, -li * d * lj, options.drop_tolerance)?;
                 }
             }
@@ -631,34 +910,43 @@ fn factor_ldlt(
             let a = active[k].get(&k).copied().unwrap_or(0.0);
             let b = active[k].get(&(k + 1)).copied().unwrap_or(0.0);
             let c = active[k + 1].get(&(k + 1)).copied().unwrap_or(0.0);
-            let determinant = a * c - b * b;
-            if determinant.abs() <= threshold * threshold {
+            let pivot = SymmetricPivot::new(a, b, c);
+            if pivot.determinant.abs() <= (threshold / pivot.scale).powi(2) {
                 return Err(SparseDirectError::Singular { pivot: k });
             }
-            minimum_pivot = minimum_pivot.min(determinant.abs().sqrt());
-            for i in k + 2..n {
+            minimum_pivot = minimum_pivot.min(pivot.scale * pivot.determinant.abs().sqrt());
+            let neighbors: BTreeSet<_> = active[k]
+                .range((k + 2)..)
+                .chain(active[k + 1].range((k + 2)..))
+                .map(|(&i, _)| i)
+                .collect();
+            let mut multipliers = Vec::new();
+            for i in neighbors {
                 let r1 = active[i].get(&k).copied().unwrap_or(0.0);
                 let r2 = active[i].get(&(k + 1)).copied().unwrap_or(0.0);
-                let l1 = (c * r1 - b * r2) / determinant;
-                let l2 = (-b * r1 + a * r2) / determinant;
+                let (l1, l2) = pivot.solve(r1, r2);
+                if !l1.is_finite() || !l2.is_finite() {
+                    return Err(SparseDirectError::InvalidNumericInput);
+                }
                 if l1.abs() > options.drop_tolerance {
                     lower[i].insert(k, l1);
                 }
                 if l2.abs() > options.drop_tolerance {
                     lower[i].insert(k + 1, l2);
                 }
+                let l1 = lower[i].get(&k).copied().unwrap_or(0.0);
+                let l2 = lower[i].get(&(k + 1)).copied().unwrap_or(0.0);
+                if l1 != 0.0 || l2 != 0.0 {
+                    multipliers.push((i, l1, l2));
+                }
             }
-            for i in k + 2..n {
-                let li1 = lower[i].get(&k).copied().unwrap_or(0.0);
-                let li2 = lower[i].get(&(k + 1)).copied().unwrap_or(0.0);
-                for j in i..n {
-                    let lj1 = lower[j].get(&k).copied().unwrap_or(0.0);
-                    let lj2 = lower[j].get(&(k + 1)).copied().unwrap_or(0.0);
+            for (position, &(i, li1, li2)) in multipliers.iter().enumerate() {
+                for &(j, lj1, lj2) in &multipliers[position..] {
                     let delta = -(li1 * (a * lj1 + b * lj2) + li2 * (b * lj1 + c * lj2));
                     update_symmetric(&mut active, i, j, delta, options.drop_tolerance)?;
                 }
             }
-            blocks.push(DiagonalBlock::Two { index: k, a, b, c });
+            blocks.push(DiagonalBlock::Two { index: k, pivot });
             k += 2;
         }
     }
@@ -680,7 +968,7 @@ fn factor_ldlt(
         .fold(0.0_f64, |m, v| m.max(v.abs()));
     let maximum_diagonal = blocks.iter().fold(0.0_f64, |maximum, block| match *block {
         DiagonalBlock::One { value, .. } => maximum.max(value.abs()),
-        DiagonalBlock::Two { a, b, c, .. } => maximum.max(a.abs()).max(b.abs()).max(c.abs()),
+        DiagonalBlock::Two { pivot, .. } => maximum.max(pivot.scale),
     });
     let maximum_factor = maximum_lower.max(maximum_diagonal);
     let diagnostics = diagnostics(
@@ -760,7 +1048,7 @@ fn block_inertia(blocks: &[DiagonalBlock], tolerance: f64) -> SparseInertia {
         negative: 0,
         zero: 0,
     };
-    let mut count = |value: f64| {
+    let mut count = |value: f64, tolerance: f64| {
         if value > tolerance {
             result.positive += 1
         } else if value < -tolerance {
@@ -771,12 +1059,20 @@ fn block_inertia(blocks: &[DiagonalBlock], tolerance: f64) -> SparseInertia {
     };
     for block in blocks {
         match *block {
-            DiagonalBlock::One { value, .. } => count(value),
-            DiagonalBlock::Two { a, b, c, .. } => {
+            DiagonalBlock::One { value, .. } => count(value, tolerance),
+            DiagonalBlock::Two { pivot, .. } => {
+                let SymmetricPivot {
+                    a,
+                    b,
+                    c,
+                    scale,
+                    determinant,
+                } = pivot;
                 let middle = 0.5 * (a + c);
-                let radius = (0.25 * (a - c).powi(2) + b * b).sqrt();
-                count(middle + radius);
-                count(middle - radius);
+                let radius = (0.5 * (a - c)).hypot(b);
+                let large = middle + radius.copysign(middle);
+                count(large, tolerance / scale);
+                count(determinant / large, tolerance / scale);
             }
         }
     }
@@ -848,42 +1144,114 @@ fn residual(
     matrix: &CsrMatrix<f64>,
     rhs: &[f64],
     solution: &[f64],
+    transpose: bool,
 ) -> Result<Vec<f64>, SparseDirectError> {
     validate_rhs(rhs, matrix.rows())?;
-    let product = matrix
-        .spmv(solution)
-        .map_err(|_| SparseDirectError::InvalidNumericInput)?;
-    Ok(rhs.iter().zip(product).map(|(b, ax)| b - ax).collect())
-}
-fn backward_error(matrix: &CsrMatrix<f64>, rhs: &[f64], solution: &[f64], residual: &[f64]) -> f64 {
-    let mut row_sums = vec![0.0; matrix.rows()];
-    for (r, _, v) in matrix.iter_entries() {
-        row_sums[r] += v.abs();
+    let product = if transpose {
+        matrix.transpose_spmv(solution)
+    } else {
+        matrix.spmv(solution)
     }
-    let a_norm = row_sums.into_iter().fold(0.0_f64, f64::max);
-    let x_norm = solution.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-    let b_norm = rhs.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-    let r_norm = residual.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-    r_norm / (a_norm * x_norm + b_norm).max(f64::MIN_POSITIVE)
+    .map_err(|_| SparseDirectError::InvalidNumericInput)?;
+    finite_solution(rhs.iter().zip(product).map(|(b, ax)| b - ax).collect())
 }
-fn make_report(
+fn operator_norm(matrix: &CsrMatrix<f64>, transpose: bool) -> f64 {
+    let mut sums = vec![
+        0.0;
+        if transpose {
+            matrix.cols()
+        } else {
+            matrix.rows()
+        }
+    ];
+    for (r, c, v) in matrix.iter_entries() {
+        sums[if transpose { c } else { r }] += v.abs();
+    }
+    sums.into_iter().fold(0.0, f64::max)
+}
+fn norm_inf(values: &[f64]) -> f64 {
+    values.iter().fold(0.0_f64, |m, v| m.max(v.abs()))
+}
+fn backward_error(a: f64, b: f64, x: &[f64], residual: &[f64]) -> f64 {
+    let x = norm_inf(x);
+    let r = norm_inf(residual);
+    let product = a * x;
+    if product.is_infinite() {
+        return ((r / a) / x) / (1.0 + (b / a) / x);
+    }
+    let scale = product.max(b);
+    if scale == 0.0 {
+        return r;
+    }
+    (r / scale) / (product / scale + b / scale)
+}
+fn finite_solution(solution: Vec<f64>) -> Result<Vec<f64>, SparseDirectError> {
+    if solution.iter().all(|x| x.is_finite()) {
+        Ok(solution)
+    } else {
+        Err(SparseDirectError::InvalidNumericInput)
+    }
+}
+
+fn refine(
     matrix: &CsrMatrix<f64>,
     rhs: &[f64],
-    solution: Vec<f64>,
-    refinement_steps: usize,
-    diagnostics: SparseFactorizationDiagnostics,
+    options: &SparseNumericOptions,
+    diagnostics: &SparseFactorizationDiagnostics,
+    transpose: bool,
+    solve: impl Fn(&[f64]) -> Result<Vec<f64>, SparseDirectError>,
 ) -> Result<SparseRefinedReport, SparseDirectError> {
-    let r = residual(matrix, rhs, &solution)?;
-    let residual_norm = r.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let rhs_norm = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let backward_error = backward_error(matrix, rhs, &solution, &r);
+    let mut solution = solve(rhs)?;
+    let a_norm = operator_norm(matrix, transpose);
+    if !a_norm.is_finite() {
+        return Err(SparseDirectError::InvalidNumericInput);
+    }
+    let b_norm = norm_inf(rhs);
+    let mut r = residual(matrix, rhs, &solution, transpose)?;
+    let mut error = backward_error(a_norm, b_norm, &solution, &r);
+    let mut steps = 0;
+    while steps < options.refinement_steps && error > options.refinement_tolerance {
+        let correction = solve(&r)?;
+        let next: Vec<_> = solution
+            .iter()
+            .zip(correction)
+            .map(|(x, d)| x + d)
+            .collect();
+        if next.iter().any(|x| !x.is_finite()) {
+            break;
+        }
+        let next_residual = residual(matrix, rhs, &next, transpose)?;
+        let next_error = backward_error(a_norm, b_norm, &next, &next_residual);
+        if next_error >= error {
+            break;
+        }
+        solution = next;
+        r = next_residual;
+        error = next_error;
+        steps += 1;
+    }
+    let norm = |values: &[f64]| values.iter().fold(0.0_f64, |n, v| n.hypot(*v));
+    let residual_norm = norm(&r);
+    let rhs_norm = norm(rhs);
+    let relative_residual = if rhs_norm > 0.0 {
+        residual_norm / rhs_norm
+    } else {
+        residual_norm
+    };
+    if !residual_norm.is_finite()
+        || !rhs_norm.is_finite()
+        || !relative_residual.is_finite()
+        || !error.is_finite()
+    {
+        return Err(SparseDirectError::InvalidNumericInput);
+    }
     Ok(SparseRefinedReport {
         solution,
         residual_norm,
-        relative_residual: residual_norm / rhs_norm.max(f64::MIN_POSITIVE),
-        backward_error,
-        refinement_steps,
-        diagnostics,
+        relative_residual,
+        backward_error: error,
+        refinement_steps: steps,
+        diagnostics: diagnostics.clone(),
     })
 }
 

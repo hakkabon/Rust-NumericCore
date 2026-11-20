@@ -22,7 +22,7 @@ pub use direct::{
     SparseDirectReport, SparseLu,
 };
 pub use factorization::{
-    SparseFactorizationDiagnostics, SparseInertia, SparseLdlt,
+    SparseCholeskyFactorization, SparseFactorizationDiagnostics, SparseInertia, SparseLdlt,
     SparseLuFactorization, SparseNumericOptions, SparseOrdering,
     SparseRefinedReport, SparseSymbolicAnalysis,
 };
@@ -178,6 +178,19 @@ impl<T: Copy + Default + std::ops::Add<Output = T> + std::ops::Mul<Output = T>> 
 
     pub fn nnz(&self) -> usize {
         self.values.len()
+    }
+
+    pub(crate) fn with_values(&self, values: Vec<T>) -> Result<Self, SparseDirectError> {
+        if values.len() != self.nnz() {
+            return Err(SparseDirectError::PatternMismatch);
+        }
+        Ok(Self {
+            rows: self.rows,
+            cols: self.cols,
+            row_ptr: self.row_ptr.clone(),
+            col_indices: self.col_indices.clone(),
+            values,
+        })
     }
 
     /// Iterate `(row, col, value)` triples in row-major order. Added for
