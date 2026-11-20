@@ -23,6 +23,11 @@ pub mod simplex;
 pub use simplex::RevisedSimplexSolver;
 pub mod lp_decomposition;
 pub mod decomposition_cuts;
+pub mod benders;
+pub use benders::{
+    solve_benders, BendersCutStrategy, BendersIncumbent, BendersIteration, BendersOptions,
+    BendersProblem, BendersRecourseSolution, BendersResult, BendersScenario, BendersTermination,
+};
 pub use decomposition_cuts::{
     CutId, CutInsertion, CutKind, CutOrigin, CutPoolEntry, CutScope, DecompositionCut,
     DecompositionCutPool,

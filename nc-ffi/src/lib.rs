@@ -63,6 +63,8 @@ mod nonlinear;
 pub use nonlinear::*;
 mod lp_decomposition;
 pub use lp_decomposition::*;
+mod benders;
+pub use benders::*;
 
 uniffi::setup_scaffolding!();
 
@@ -1129,7 +1131,7 @@ mod tests {
         assert_eq!(manifest.schema_version, 1);
         assert_eq!(manifest.compatibility_epoch, 1);
         assert_eq!(manifest.capabilities.len(), nc_core::CAPABILITIES.len());
-        assert_eq!(manifest.capabilities[0].identifier, "dae-integration");
+        assert_eq!(manifest.capabilities[0].identifier, "benders-decomposition");
         assert_eq!(
             manifest.capabilities.last().unwrap().identifier,
             "sparse-linear-algebra"
