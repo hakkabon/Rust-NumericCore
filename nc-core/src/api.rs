@@ -101,6 +101,23 @@ mod tests {
     }
 
     #[test]
+    fn stable_capability_contracts_are_retained() {
+        for identifier in [
+            "dense-linear-algebra",
+            "iterative-linear-solvers",
+            "lp-qp-milp",
+            "nonlinear-optimization",
+            "numerical-validation",
+            "sparse-linear-algebra",
+        ] {
+            assert_eq!(
+                capability_by_id(identifier),
+                Some(&capability(identifier, ApiStability::Stable))
+            );
+        }
+    }
+
+    #[test]
     fn manifest_is_well_formed_and_queryable() {
         let identifiers: Vec<_> = CAPABILITIES.iter().map(|item| item.identifier).collect();
         assert_eq!(

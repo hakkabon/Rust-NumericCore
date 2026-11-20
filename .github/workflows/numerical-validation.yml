@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: "53 4 * * 1" # Mondays, UTC
   workflow_dispatch:
 
 permissions:
@@ -22,9 +24,17 @@ jobs:
       - name: Run complete validation suite
         run: cargo test --workspace
       - name: Produce reproducible standard-tier evidence
-        run: cargo run -p nc-optimize --example numerical_validation -- standard > target/numerical-validation.json
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p target
+          rustc --version --verbose > target/toolchain.txt
+          cargo --version >> target/toolchain.txt
+          cargo run -p nc-optimize --example numerical_validation -- standard > target/numerical-validation.json
       - name: Upload numerical evidence
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: rust-numerical-validation
-          path: target/numerical-validation.json
+          path: |
+            target/numerical-validation.json
+            target/toolchain.txt
