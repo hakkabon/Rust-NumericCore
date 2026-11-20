@@ -6,8 +6,8 @@ use crate::{
     RevisedSimplexSolver, ScaledSolver, ScalingOptions, Solver, SparseLinearWorkspace,
     SparseHessian, SparseJacobian, SparseKktProblem, SparseKktWorkspace,
     certify_convex_qp, consistent_dae_initial_conditions, integrate_dae_with_events,
-    parse_spice_netlist, CertificateClaim, CertificateTolerance, DaeEvaluation, EventDirection,
-    SpiceAnalysis, TimeIntegrationOptions, ContinuumFemModel, ContinuumKinematics,
+    CertificateClaim, CertificateTolerance, DaeEvaluation, EventDirection,
+    TimeIntegrationOptions, ContinuumFemModel, ContinuumKinematics,
     ContinuumTriangle3, FemConstraint, FemNode2D, FemNodalLoad, LinearElasticContinuumMaterial,
     EngineeringElement, EngineeringEquation, EngineeringModel, EngineeringParameter,
     EngineeringPort, EngineeringResponseGradient, EngineeringUnknown, EngineeringUnknownRole,
@@ -308,25 +308,6 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
     ]).classified("internal.sparse.nonlinear-kkt", "sparse-nonlinear",
         ValidationTier::Standard);
 
-    let netlist = parse_spice_netlist("validation RC low pass\nV1 in 0 DC 1 AC 1\nR1 in out 1k\nC1 out 0 1u\n.OP\n.AC DEC 10 10 10k\n.END")
-        .map_err(|error| OptimizeError::InvalidProblem(error.to_string()))?;
-    let operating = netlist.circuit.dc_operating_point(None, Default::default())?;
-    let ac_request = netlist.analyses.iter().find_map(|analysis| match analysis {
-        SpiceAnalysis::Ac(request) => Some(request), _ => None,
-    }).ok_or_else(|| OptimizeError::InvalidProblem("SPICE validation lost AC request".into()))?;
-    let sweep = netlist.circuit.ac_analysis(&operating.state, &ac_request.frequencies(),
-        &netlist.ac_excitations)?;
-    let maximum_ac_residual = sweep.points.iter().map(|point| point.residual_norm)
-        .fold(0.0_f64, f64::max);
-    let spice_case = ValidationCase::new("SPICE netlist DC and AC integration", vec![
-        ValidationMetric::compare("SPICE DC output", operating.node_voltages[2], 1.0, tight),
-        ValidationMetric::compare("SPICE AC point count", sweep.points.len() as f64, 31.0,
-            ValidationTolerance::new(0.0, 0.0)),
-        ValidationMetric::compare("SPICE AC maximum residual", maximum_ac_residual, 0.0,
-            ValidationTolerance::new(1e-9, 0.0)),
-    ]).classified("internal.circuit.spice-netlist", "circuit-analysis",
-        ValidationTier::Standard);
-
     let dae_system = |_: f64, y: &[f64], yd: &[f64]| Ok(DaeEvaluation::from_mass_matrix(
         vec![vec![1.0, 0.0], vec![0.0, 0.0]], &[-y[0], 1.0-y[0]-y[1]],
         &[vec![-1.0, 0.0], vec![-1.0, -1.0]], yd));
@@ -503,7 +484,6 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
         presolve_case,
         sparse_case,
         kkt_case,
-        spice_case,
         dae_case,
         continuum_case,
         sensitivity_case,
@@ -523,11 +503,11 @@ mod tests {
     fn production_reference_program_passes() {
         let report = run_reference_validation().unwrap();
         assert!(report.passed(), "{report:#?}");
-        assert_eq!(report.cases.len(), 17);
+        assert_eq!(report.cases.len(), 16);
         assert_eq!(report.failure_count(), 0);
         assert!(report.maximum_normalized_error() <= 1.0);
         assert_eq!(report.for_tier(ValidationTier::Smoke).cases.len(), 4);
-        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 17);
+        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 16);
 
         let first = report.snapshot("rust", ValidationTier::Standard);
         let second = run_reference_validation()

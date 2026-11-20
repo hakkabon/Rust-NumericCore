@@ -33,8 +33,6 @@ pub const API_COMPATIBILITY_EPOCH: u32 = 1;
 /// Identifiers, stability values, and ordering are shared with
 /// Swift-NumericCore's `NumericCoreAPI.capabilities`.
 pub const CAPABILITIES: &[Capability] = &[
-    capability("ampl-modeling", ApiStability::Provisional),
-    capability("circuit-analysis", ApiStability::Provisional),
     capability("dae-integration", ApiStability::Provisional),
     capability("dense-linear-algebra", ApiStability::Stable),
     capability("engineering-models", ApiStability::Provisional),
@@ -86,8 +84,6 @@ mod tests {
                 .map(|capability| capability.identifier)
                 .collect::<Vec<_>>(),
             vec![
-                "ampl-modeling",
-                "circuit-analysis",
                 "dae-integration",
                 "dense-linear-algebra",
                 "engineering-models",

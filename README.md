@@ -1,8 +1,8 @@
 # Rust-NumericCore
 
 The Rust half of NumericCore — storage, kernels, sparse linear algebra,
-iterative solvers, and the solver half of the AMPL-style linear and nonlinear
-optimization interface. Consumed
+iterative solvers, and linear, mixed-integer, and nonlinear optimization.
+Consumed
 from Swift via [`Swift-NumericCore`](https://github.com/hakkabon/Swift-NumericCore),
 which depends on this repo's tagged releases (an XCFramework built by
 `scripts/build-xcframework.sh` / `.github/workflows/release.yml`).
@@ -17,6 +17,11 @@ independent of, and has no relationship to, Apple's
 [`apple/swift-numerics`](https://github.com/apple/swift-numerics). The
 similar-sounding name is a known, deliberately-avoided collision — see
 that same ADR for why `NumericCore` was kept as the name.
+
+Circuit models, analysis and SPICE belong to OhmLab. The v0.35.0 workspace
+retires the circuit-specific Rust APIs and retains numerical solvers, DAE
+integration, engineering assembly and sensitivities. The AMPL-like frontend
+is a separate Swift package.
 
 ## Workspace layout
 
@@ -136,18 +141,6 @@ Phase 40 adds a shared component-based engineering representation with typed
 unknowns and parameters, oriented topology, portable constitutive expression
 graphs, exact sparse residual/Jacobian stamping, parameter sensitivities, and
 a direct bridge into residual-form DAE integration.
-Phase 41 adds a modified-nodal-analysis circuit kernel with explicit ground
-elimination, sparse analytic stamps for R/C/L, independent current and voltage
-sources, and exponential diodes, plus DC operating-point and transient DAE
-entry points, waveforms, branch-current recovery, and residual diagnostics.
-Phase 42 deepens nonlinear and transient circuit analysis with VCCS/VCVS
-controlled sources, an analytic level-1 NMOS model, source-stepped/gmin DC
-continuation, and deterministic pulse breakpoints for discontinuity-aware time
-integration.
-Phase 43 adds small-signal AC sweeps by linearizing the nonlinear MNA system at
-a DC operating point and solving its real block complex form. It also adds
-bounded response-driven circuit optimization with finite-difference design
-sensitivities and reusable L-BFGS-B convergence diagnostics.
 Phase 44 establishes finite-element analysis with sparse global assembly,
 Dirichlet elimination, reaction recovery, constant-gradient thermal triangles,
 and planar truss elements with strain, stress, force, energy, and residual
@@ -184,15 +177,9 @@ auditable metrics. LP/MILP results are checked for original-model feasibility
 and integrality and require a supplied global gap for optimality; convex QPs
 receive full primal/KKT/complementarity verification and active-set rank
 warnings. Invalid or non-finite evidence fails closed.
-Phase 54 adds a source-located SPICE netlist compiler for a practical R/C/L,
-independent/controlled-source, diode, and level-1 NMOS subset. Parameters,
-initial conditions, transient source waveforms, and DC/transient/AC directives
-lower into the native typed circuit kernel; standard validation parses and
-executes an RC DC/AC case end to end.
 Phase 55 adds Jacobian-based consistent initialization for singular-mass
 index-1 DAEs, directional and terminal event location, and validated hard step
-stops. Circuit transients automatically feed source-waveform breakpoints to the
-implicit integrator so discontinuities are never crossed by one accepted step.
+stops.
 Phase 56 adds constant-strain triangular continuum elasticity for plane stress
 and plane strain, with consistent body forces, sparse constrained assembly,
 full stress/strain and principal/von-Mises recovery, reactions, and independent
