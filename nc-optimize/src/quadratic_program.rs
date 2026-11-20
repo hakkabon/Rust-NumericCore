@@ -2,6 +2,7 @@
 
 use crate::{Bound, OptimizeError};
 use nc_sparse::CsrMatrix;
+use std::borrow::Cow;
 
 /// Minimize `0.5 x'Qx + c'x + constant` subject to sparse row and variable bounds.
 #[derive(Debug, Clone)]
@@ -169,23 +170,92 @@ pub fn solve_convex_qp_with_observer<O>(
     problem: &QuadraticProblem,
     options: QuadraticOptions,
     warm: Option<&QuadraticWarmStart>,
-    mut observer: O,
+    observer: O,
 ) -> Result<QuadraticResult, OptimizeError>
 where
     O: FnMut(QuadraticIteration) -> bool,
 {
     validate_options(options)?;
     problem.validate(options.convexity_tolerance)?;
+    let system = PreparedQuadratic::new(problem, options.rho);
+    solve_prepared(problem, options, &system, warm, observer)
+}
+
+/// Reuses the constraint assembly and the initial-rho factor for a family of
+/// convex QPs with fixed Hessian and constraint matrix.
+pub struct QuadraticWorkspace {
+    problem: QuadraticProblem,
+    options: QuadraticOptions,
+    system: PreparedQuadratic,
+    warm: Option<QuadraticWarmStart>,
+}
+
+impl QuadraticWorkspace {
+    pub fn new(problem: QuadraticProblem, options: QuadraticOptions) -> Result<Self, OptimizeError> {
+        validate_options(options)?;
+        problem.validate(options.convexity_tolerance)?;
+        let system = PreparedQuadratic::new(&problem, options.rho);
+        Ok(Self { problem, options, system, warm: None })
+    }
+
+    pub fn problem(&self) -> &QuadraticProblem { &self.problem }
+
+    pub fn update(&mut self, linear: Vec<f64>, constant: f64, row_bounds: Vec<Bound>,
+                  variable_bounds: Vec<Bound>) -> Result<(), OptimizeError> {
+        if linear.len() != self.problem.linear.len()
+            || row_bounds.len() != self.problem.row_bounds.len()
+            || variable_bounds.len() != self.problem.variable_bounds.len()
+            || !constant.is_finite() || linear.iter().any(|value| !value.is_finite()) {
+            return Err(invalid("invalid fixed-matrix QP update"));
+        }
+        for bound in row_bounds.iter().chain(&variable_bounds) { validate_bound(bound)?; }
+        self.problem.linear = linear;
+        self.problem.constant = constant;
+        self.problem.row_bounds = row_bounds;
+        self.problem.variable_bounds = variable_bounds;
+        Ok(())
+    }
+
+    /// Retains converged primal and dual iterates for the next solve.
+    pub fn solve(&mut self) -> Result<QuadraticResult, OptimizeError> {
+        let result = solve_prepared(&self.problem, self.options, &self.system, self.warm.as_ref(), |_| true)?;
+        self.warm = (result.termination == QuadraticTermination::Converged).then(|| result.warm_start());
+        Ok(result)
+    }
+}
+
+struct PreparedQuadratic {
+    constraints: Vec<Vec<f64>>,
+    initial_factor: Option<Vec<Vec<f64>>>,
+}
+
+impl PreparedQuadratic {
+    fn new(problem: &QuadraticProblem, rho: f64) -> Self {
+        let n = problem.linear.len();
+        let m = problem.row_bounds.len();
+        let mut constraints = vec![vec![0.0; n]; m + n];
+        for (row, col, value) in problem.constraints.iter_entries() {
+            constraints[row][col] += value;
+        }
+        for j in 0..n { constraints[m + j][j] = 1.0; }
+        let initial_factor = factor_admm_system(problem, &constraints, rho);
+        Self { constraints, initial_factor }
+    }
+}
+
+fn solve_prepared<O>(
+    problem: &QuadraticProblem,
+    options: QuadraticOptions,
+    system: &PreparedQuadratic,
+    warm: Option<&QuadraticWarmStart>,
+    mut observer: O,
+) -> Result<QuadraticResult, OptimizeError>
+where O: FnMut(QuadraticIteration) -> bool,
+{
     let n = problem.linear.len();
     let m = problem.row_bounds.len();
     let p = m + n;
-    let mut c = vec![vec![0.0; n]; p];
-    for (row, col, value) in problem.constraints.iter_entries() {
-        c[row][col] += value;
-    }
-    for j in 0..n {
-        c[m + j][j] = 1.0
-    }
+    let c = &system.constraints;
     let bounds: Vec<Bound> = problem
         .row_bounds
         .iter()
@@ -193,7 +263,7 @@ where
         .copied()
         .collect();
     let mut rho = options.rho;
-    let Some(mut factor) = factor_admm_system(problem, &c, rho) else {
+    let Some(initial_factor) = system.initial_factor.as_deref() else {
         return Ok(failure(
             problem,
             vec![0.0; n],
@@ -201,6 +271,7 @@ where
             QuadraticTermination::NumericalFailure,
         ));
     };
+    let mut factor = Cow::Borrowed(initial_factor);
     let (mut x, mut y) = if let Some(w) = warm {
         if w.primal.len() != n
             || w.row_dual.len() != m
@@ -225,7 +296,7 @@ where
     } else {
         (vec![0.0; n], vec![0.0; p])
     };
-    let mut cx = matvec(&c, &x);
+    let mut cx = matvec(c, &x);
     let mut z: Vec<f64> = cx
         .iter()
         .zip(&y)
@@ -250,7 +321,7 @@ where
                 QuadraticTermination::NumericalFailure,
             ));
         }
-        cx = matvec(&c, &x);
+        cx = matvec(c, &x);
         let old_z = z.clone();
         z = cx
             .iter()
@@ -263,12 +334,12 @@ where
         }
         last_primal = inf_norm(&cx.iter().zip(&z).map(|(a, b)| a - b).collect::<Vec<_>>());
         let z_change: Vec<f64> = z.iter().zip(&old_z).map(|(a, b)| a - b).collect();
-        last_dual = rho * inf_norm(&transpose_matvec(&c, &z_change));
+        last_dual = rho * inf_norm(&transpose_matvec(c, &z_change));
         let eps_primal = options.absolute_tolerance
             + options.relative_tolerance * inf_norm(&cx).max(inf_norm(&z));
         let lambda: Vec<f64> = y.iter().map(|v| rho * v).collect();
         let qx = matvec(&problem.quadratic, &x);
-        let ctl = transpose_matvec(&c, &lambda);
+        let ctl = transpose_matvec(c, &lambda);
         let eps_dual = options.absolute_tolerance
             + options.relative_tolerance
                 * inf_norm(&qx)
@@ -311,10 +382,10 @@ where
                 let scale = rho / next_rho;
                 for value in &mut y { *value *= scale; }
                 rho = next_rho;
-                let Some(next_factor) = factor_admm_system(problem, &c, rho) else {
+                let Some(next_factor) = factor_admm_system(problem, c, rho) else {
                     return Ok(failure(problem, x, iteration, QuadraticTermination::NumericalFailure));
                 };
-                factor = next_factor;
+                factor = Cow::Owned(next_factor);
             }
         }
     }

@@ -61,6 +61,8 @@ use std::sync::{Arc, Mutex};
 
 mod nonlinear;
 pub use nonlinear::*;
+mod lp_decomposition;
+pub use lp_decomposition::*;
 
 uniffi::setup_scaffolding!();
 

@@ -47,6 +47,7 @@
 //!   `NumericCoreAMPL`'s `var y <= 10;` leaves the lower bound
 //!   unspecified) is handled correctly, not treated as a limitation.
 
+use crate::lp_decomposition::{LpBasis, LpBasisStatus};
 use crate::{Bound, OptimizeError, Problem, SolveStatus, Solution, Solver};
 use std::collections::HashSet;
 
@@ -70,48 +71,62 @@ impl Solver for RevisedSimplexSolver {
 
     fn solve(&self, problem: &Problem) -> Result<Solution, OptimizeError> {
         problem.validate()?;
+        self.validate()?;
+        let mut workspace = Workspace::new(problem)?;
+        let outcome = self.run(&mut workspace)?;
+        Ok(workspace.solution(problem.objective.len(), outcome.status, &problem.objective))
+    }
+}
+
+pub(crate) struct SimplexOutcome {
+    pub status: SolveStatus,
+    pub direction: Option<Vec<f64>>,
+    pub iterations: usize,
+    pub pivots: usize,
+}
+
+impl RevisedSimplexSolver {
+    pub(crate) fn validate(&self) -> Result<(), OptimizeError> {
         if self.max_iterations == 0 || !self.tolerance.is_finite() || self.tolerance <= 0.0 {
             return Err(OptimizeError::InvalidConfiguration(
                 "revised simplex requires max_iterations > 0 and finite tolerance > 0",
             ));
         }
-        let mut workspace = Workspace::new(problem)?;
-        let n = problem.objective.len();
-        let tol = self.tolerance;
+        Ok(())
+    }
 
-        // Phase 1: minimize sum of bound infeasibilities using a
-        // temporary cost vector recomputed each iteration (see module
-        // docs). The real objective plays no role yet.
+    pub(crate) fn run(&self, workspace: &mut Workspace) -> Result<SimplexOutcome, OptimizeError> {
+        let tol = self.tolerance;
+        workspace.iterations = 0;
+        workspace.pivots = 0;
         let zero_cost = vec![0.0; workspace.n_total];
-        match workspace.run_phase(&zero_cost, true, self.max_iterations, tol)? {
-            PhaseOutcome::IterationLimit => {
-                return Ok(workspace.solution(n, SolveStatus::IterationLimit, &problem.objective))
-            }
-            PhaseOutcome::Unbounded => {
-                // Phase 1's objective is bounded below by 0 by
-                // construction; reaching this would indicate a bug in
-                // the ratio test, not a legitimate outcome. Surfaced as
-                // an error rather than silently mis-reporting a status.
+        let mut direction = None;
+        let status = match workspace.run_phase(&zero_cost, true, self.max_iterations, tol)? {
+            PhaseOutcome::IterationLimit => SolveStatus::IterationLimit,
+            PhaseOutcome::Unbounded(_) => {
                 return Err(OptimizeError::NotImplemented(
                     "revised simplex: phase 1 reported unbounded, which should be impossible",
                 ));
             }
-            PhaseOutcome::Optimal => {}
-        }
-
-        if workspace.total_infeasibility(tol) > tol.sqrt() {
-            return Ok(workspace.solution(n, SolveStatus::Infeasible, &problem.objective));
-        }
-
-        // Phase 2: same machinery, real cost vector, starting from the
-        // feasible basis Phase 1 found.
-        match workspace.run_phase(&workspace.real_cost.clone(), false, self.max_iterations, tol)? {
-            PhaseOutcome::Optimal => Ok(workspace.solution(n, SolveStatus::Optimal, &problem.objective)),
-            PhaseOutcome::Unbounded => Ok(workspace.solution(n, SolveStatus::Unbounded, &problem.objective)),
-            PhaseOutcome::IterationLimit => {
-                Ok(workspace.solution(n, SolveStatus::IterationLimit, &problem.objective))
+            PhaseOutcome::Optimal if workspace.total_infeasibility(tol) > tol.sqrt() => {
+                SolveStatus::Infeasible
             }
-        }
+            PhaseOutcome::Optimal => {
+                match workspace.run_phase(
+                    &workspace.real_cost.clone(), false, self.max_iterations, tol,
+                )? {
+                    PhaseOutcome::Optimal => SolveStatus::Optimal,
+                    PhaseOutcome::Unbounded(ray) => {
+                        direction = Some(ray);
+                        SolveStatus::Unbounded
+                    }
+                    PhaseOutcome::IterationLimit => SolveStatus::IterationLimit,
+                }
+            }
+        };
+        Ok(SimplexOutcome {
+            status, direction, iterations: workspace.iterations, pivots: workspace.pivots,
+        })
     }
 }
 
@@ -124,7 +139,7 @@ enum NonbasicBound {
 
 enum PhaseOutcome {
     Optimal,
-    Unbounded,
+    Unbounded(Vec<f64>),
     IterationLimit,
 }
 
@@ -137,7 +152,7 @@ enum TargetBound {
     Upper,
 }
 
-struct Workspace {
+pub(crate) struct Workspace {
     m: usize,
     n_total: usize,
     /// Dense `m x n_total` constraint matrix `[A | -I]`. Dense, not
@@ -152,10 +167,12 @@ struct Workspace {
     /// Explicit basis inverse, `m x m`, updated in place each pivot.
     binv: Vec<Vec<f64>>,
     x: Vec<f64>,
+    iterations: usize,
+    pivots: usize,
 }
 
 impl Workspace {
-    fn new(problem: &Problem) -> Result<Self, OptimizeError> {
+    pub(crate) fn new(problem: &Problem) -> Result<Self, OptimizeError> {
         let m = problem.constraints.rows();
         let n = problem.objective.len();
         let n_total = n + m;
@@ -173,7 +190,7 @@ impl Workspace {
 
         let mut matrix = vec![vec![0.0; n_total]; m];
         for (row, col, value) in problem.constraints.iter_entries() {
-            matrix[row][col] = value;
+            matrix[row][col] += value;
         }
         for i in 0..m {
             matrix[i][n + i] = -1.0;
@@ -221,7 +238,96 @@ impl Workspace {
             is_basic[b] = true;
         }
 
-        Ok(Self { m, n_total, matrix, lo, hi, real_cost, basis, is_basic, nb_status, binv, x })
+        if matrix.iter().flatten().chain(&x).any(|value| !value.is_finite()) {
+            return Err(OptimizeError::InvalidProblem("non-finite simplex assembly".into()));
+        }
+        Ok(Self { m, n_total, matrix, lo, hi, real_cost, basis, is_basic, nb_status, binv, x,
+                  iterations: 0, pivots: 0 })
+    }
+
+    pub(crate) fn basis(&self, n: usize) -> LpBasis {
+        let status = |j: usize| {
+            if self.is_basic[j] {
+                return LpBasisStatus::Basic;
+            }
+            match self.nb_status[j] {
+                NonbasicBound::AtLower => LpBasisStatus::AtLower,
+                NonbasicBound::AtUpper => LpBasisStatus::AtUpper,
+                NonbasicBound::Free => LpBasisStatus::Free,
+            }
+        };
+        LpBasis {
+            variables: (0..n).map(status).collect(),
+            rows: (n..self.n_total).map(status).collect(),
+        }
+    }
+
+    pub(crate) fn install_basis(&mut self, basis: &LpBasis) -> Result<(), OptimizeError> {
+        if basis.rows.len() != self.m || basis.variables.len() != self.n_total - self.m {
+            return Err(OptimizeError::InvalidProblem("LP basis dimensions do not match".into()));
+        }
+        self.basis.clear();
+        for (j, status) in basis.variables.iter().chain(&basis.rows).enumerate() {
+            self.is_basic[j] = *status == LpBasisStatus::Basic;
+            match status {
+                LpBasisStatus::Basic => self.basis.push(j),
+                LpBasisStatus::AtLower => self.nb_status[j] = NonbasicBound::AtLower,
+                LpBasisStatus::AtUpper => self.nb_status[j] = NonbasicBound::AtUpper,
+                LpBasisStatus::Free => self.nb_status[j] = NonbasicBound::Free,
+            }
+        }
+        if self.basis.len() != self.m {
+            return Err(OptimizeError::InvalidProblem("LP basis has the wrong number of basic entries".into()));
+        }
+        self.refactor_basis()?;
+        self.reset_point()
+    }
+
+    /// Retain the matrix and inverse across numerical edits.
+    pub(crate) fn refresh(&mut self, problem: &Problem) -> Result<(), OptimizeError> {
+        self.real_cost[..problem.objective.len()].copy_from_slice(&problem.objective);
+        for (j, bound) in problem.var_bounds.iter().chain(&problem.row_bounds).enumerate() {
+            self.lo[j] = bound_lower(bound);
+            self.hi[j] = bound_upper(bound);
+        }
+        self.reset_point()
+    }
+
+    fn reset_point(&mut self) -> Result<(), OptimizeError> {
+        let mut rhs = vec![0.0; self.m];
+        for j in 0..self.n_total {
+            if self.is_basic[j] { continue; }
+            let (status, value) = match self.nb_status[j] {
+                NonbasicBound::AtLower if self.lo[j].is_finite() => (NonbasicBound::AtLower, self.lo[j]),
+                NonbasicBound::AtUpper if self.hi[j].is_finite() => (NonbasicBound::AtUpper, self.hi[j]),
+                _ => initial_nonbasic(self.lo[j], self.hi[j]),
+            };
+            self.nb_status[j] = status;
+            self.x[j] = value;
+            for (row, rhs) in rhs.iter_mut().enumerate() {
+                *rhs -= self.matrix[row][j] * value;
+            }
+        }
+        for (i, &j) in self.basis.iter().enumerate() {
+            self.x[j] = self.binv[i].iter().zip(&rhs).map(|(a, b)| a * b).sum();
+        }
+        if self.x.iter().any(|value| !value.is_finite()) {
+            return Err(OptimizeError::InvalidProblem("non-finite warm-start point".into()));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn row_multipliers(&self, phase1_tolerance: Option<f64>) -> Vec<f64> {
+        if let Some(tolerance) = phase1_tolerance {
+            self.compute_y(&self.phase1_cost(tolerance))
+        } else {
+            self.compute_y(&self.real_cost)
+        }
+    }
+
+    pub(crate) fn maximum_basic_reduced_cost(&self, y: &[f64]) -> f64 {
+        self.basis.iter().map(|&j| self.reduced_cost(&self.real_cost, y, j).abs())
+            .fold(0.0, f64::max)
     }
 
     fn column(&self, j: usize) -> Vec<f64> {
@@ -300,6 +406,7 @@ impl Workspace {
         let mut bland_mode = false;
         let mut pivots_since_refactorization = 0usize;
         for _ in 0..max_iterations {
+            self.iterations = self.iterations.saturating_add(1);
             let state: Vec<(usize, u8)> = self.basis.iter().copied().map(|basic| {
                 let status = match self.nb_status[basic] {
                     NonbasicBound::AtLower => 0,
@@ -404,7 +511,12 @@ impl Workspace {
             };
 
             if !theta_max.is_finite() {
-                return Ok(PhaseOutcome::Unbounded);
+                let mut direction = vec![0.0; self.n_total - self.m];
+                if q < direction.len() { direction[q] = delta; }
+                for (&basic, &rate) in self.basis.iter().zip(&alpha) {
+                    if basic < direction.len() { direction[basic] = -rate * delta; }
+                }
+                return Ok(PhaseOutcome::Unbounded(direction));
             }
 
             // Apply the step to every basic variable and the entering
@@ -437,6 +549,7 @@ impl Workspace {
                 self.is_basic[q] = true;
                 self.basis[r] = q;
                 self.pivot(&alpha, r);
+                self.pivots = self.pivots.saturating_add(1);
                 pivots_since_refactorization += 1;
                 if pivots_since_refactorization == 64 {
                     self.refactor_basis()?;
@@ -495,7 +608,7 @@ impl Workspace {
         cost
     }
 
-    fn solution(&self, n: usize, status: SolveStatus, objective: &[f64]) -> Solution {
+    pub(crate) fn solution(&self, n: usize, status: SolveStatus, objective: &[f64]) -> Solution {
         let variable_values: Vec<f64> = self.x[..n].to_vec();
         let objective_value: f64 = objective.iter().zip(&variable_values).map(|(c, x)| c * x).sum();
         Solution { variable_values, objective_value, status }

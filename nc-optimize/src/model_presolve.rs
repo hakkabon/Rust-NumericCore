@@ -1,6 +1,7 @@
 //! Reversible sparse LP/MILP presolve and postsolve reconstruction.
 
-use crate::{Bound, OptimizeError, Problem};
+use crate::{verify_lp_dual, verify_lp_farkas, verify_lp_unbounded_ray, Bound, LpDualSolution,
+    LpFarkasCertificate, LpUnboundedRay, OptimizeError, Problem};
 use nc_sparse::CooMatrix;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -57,12 +58,47 @@ impl PresolvedProblem {
             }
         }
         for (i, &original) in self.active_variables.iter().enumerate() {
-            point[original] = reduced[i];
+            *point.get_mut(original).ok_or_else(|| invalid("invalid postsolve variable map"))? = reduced[i];
         }
         Ok(point)
     }
     pub fn restore_objective(&self, reduced_objective: f64) -> f64 {
         reduced_objective + self.objective_offset
+    }
+
+    /// Try zero extension for removed rows and resynthesize reduced costs in
+    /// the original model. Tightened bounds can make this lift unavailable.
+    pub fn lift_lp_dual(&self, original: &Problem, reduced_point: &[f64],
+                        reduced_row_multipliers: &[f64], tolerance: f64) -> Option<LpDualSolution> {
+        let point = self.restore_point(reduced_point).ok()?;
+        let rows = self.extend_rows(original, reduced_row_multipliers)?;
+        verify_lp_dual(original, &point, &rows, tolerance)
+    }
+
+    pub fn lift_lp_farkas(&self, original: &Problem, reduced_row_multipliers: &[f64],
+                          tolerance: f64) -> Option<LpFarkasCertificate> {
+        let rows = self.extend_rows(original, reduced_row_multipliers)?;
+        verify_lp_farkas(original, &rows, tolerance)
+    }
+
+    pub fn lift_lp_unbounded_ray(&self, original: &Problem, reduced_point: &[f64],
+                                 reduced_direction: &[f64], tolerance: f64) -> Option<LpUnboundedRay> {
+        if reduced_direction.len() != self.active_variables.len() { return None; }
+        let point = self.restore_point(reduced_point).ok()?;
+        let mut direction = vec![0.0; original.objective.len()];
+        for (&index, &value) in self.active_variables.iter().zip(reduced_direction) {
+            *direction.get_mut(index)? = value;
+        }
+        verify_lp_unbounded_ray(original, &point, &direction, tolerance)
+    }
+
+    fn extend_rows(&self, original: &Problem, reduced_rows: &[f64]) -> Option<Vec<f64>> {
+        if reduced_rows.len() != self.kept_rows.len() { return None; }
+        let mut rows = vec![0.0; original.row_bounds.len()];
+        for (&index, &value) in self.kept_rows.iter().zip(reduced_rows) {
+            *rows.get_mut(index)? = value;
+        }
+        Some(rows)
     }
 }
 

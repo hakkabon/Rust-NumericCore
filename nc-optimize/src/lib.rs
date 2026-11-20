@@ -21,6 +21,17 @@ pub use nc_core::{
 
 pub mod simplex;
 pub use simplex::RevisedSimplexSolver;
+pub mod lp_decomposition;
+pub mod decomposition_cuts;
+pub use decomposition_cuts::{
+    CutId, CutInsertion, CutKind, CutOrigin, CutPoolEntry, CutScope, DecompositionCut,
+    DecompositionCutPool,
+};
+pub use lp_decomposition::{
+    verify_lp_dual, verify_lp_farkas, verify_lp_unbounded_ray, LpBasis, LpBasisStatus,
+    LpColumn, LpDualSolution, LpFarkasCertificate, LpRow, LpSolveReport, LpSubproblemID,
+    LpUnboundedRay, LpUpdate, LpWorkspace,
+};
 
 pub mod interior_point;
 pub use interior_point::InteriorPointSolver;
@@ -132,7 +143,7 @@ pub mod quadratic_program;
 pub use quadratic_program::{
     solve_convex_qp, solve_convex_qp_warm, solve_convex_qp_with_observer,
     QuadraticIteration, QuadraticOptions, QuadraticProblem, QuadraticResult,
-    QuadraticTermination, QuadraticWarmStart,
+    QuadraticTermination, QuadraticWarmStart, QuadraticWorkspace,
 };
 
 pub mod quadratic_polish;
