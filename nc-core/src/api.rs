@@ -48,6 +48,7 @@ pub const CAPABILITIES: &[Capability] = &[
     capability("nonlinear-optimization", ApiStability::Stable),
     capability("numerical-validation", ApiStability::Stable),
     capability("sparse-linear-algebra", ApiStability::Stable),
+    capability("stochastic-optimization", ApiStability::Provisional),
 ];
 
 const fn capability(identifier: &'static str, stability: ApiStability) -> Capability {
@@ -102,6 +103,7 @@ mod tests {
                 "nonlinear-optimization",
                 "numerical-validation",
                 "sparse-linear-algebra",
+                "stochastic-optimization",
             ]
         );
     }

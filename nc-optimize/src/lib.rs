@@ -26,6 +26,21 @@ pub mod decomposition_cuts;
 pub mod benders;
 mod benders_tree;
 pub mod integer_benders;
+pub mod stochastic;
+pub mod scenario_sampling;
+pub mod progressive_hedging;
+pub use progressive_hedging::{
+    solve_progressive_hedging, HedgingCheckpoint, HedgingTermination, ProgressiveHedgingOptions,
+    ProgressiveHedgingResult,
+};
+pub use scenario_sampling::{
+    draw_scenarios, evaluate_scenario_sample, reduce_scenarios, sample_average_problem,
+    ScenarioEvaluation, ScenarioReduction,
+};
+pub use stochastic::{
+    solve_scenario_tree, ScenarioCost, ScenarioLink, ScenarioNode, ScenarioPolicy, ScenarioRisk,
+    ScenarioSolveOptions, ScenarioSolveResult, ScenarioTermination, ScenarioTree,
+};
 pub use integer_benders::{
     solve_integer_benders, solve_logic_benders, IntegerBendersOptions, IntegerBendersProblem,
     IntegerBendersResult, IntegerBendersScenario, IntegerBendersTermination, LogicBendersEvaluation,

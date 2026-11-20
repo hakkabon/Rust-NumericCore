@@ -67,6 +67,8 @@ mod benders;
 pub use benders::*;
 mod integer_benders;
 pub use integer_benders::*;
+mod stochastic;
+pub use stochastic::*;
 
 uniffi::setup_scaffolding!();
 
@@ -1136,7 +1138,7 @@ mod tests {
         assert_eq!(manifest.capabilities[0].identifier, "benders-decomposition");
         assert_eq!(
             manifest.capabilities.last().unwrap().identifier,
-            "sparse-linear-algebra"
+            "stochastic-optimization"
         );
     }
 

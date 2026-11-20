@@ -200,6 +200,10 @@ impl QuadraticWorkspace {
 
     pub fn problem(&self) -> &QuadraticProblem { &self.problem }
 
+    pub(crate) fn set_warm_start(&mut self, warm: Option<QuadraticWarmStart>) {
+        self.warm = warm;
+    }
+
     pub fn update(&mut self, linear: Vec<f64>, constant: f64, row_bounds: Vec<Bound>,
                   variable_bounds: Vec<Bound>) -> Result<(), OptimizeError> {
         if linear.len() != self.problem.linear.len()

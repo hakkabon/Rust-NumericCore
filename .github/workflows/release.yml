@@ -67,6 +67,8 @@ jobs:
           grep -q 'func verifyLpFarkasEvidence' "${BINDINGS}"
           grep -q 'func solveBendersDecomposition' "${BINDINGS}"
           grep -q 'func solveIntegerBendersDecomposition' "${BINDINGS}"
+          grep -q 'func solveScenarioTree' "${BINDINGS}"
+          grep -q 'func runProgressiveHedging' "${BINDINGS}"
 
       - name: Compute checksum
         id: checksum
