@@ -207,35 +207,32 @@ impl EngineeringModel {
         let mut parameter_coo = CooMatrix::new(n, p);
         for element in &self.elements {
             let local = element.ports.len();
-            let mut input = Vec::with_capacity(1 + 2 * local + p);
-            input.push(time);
-            input.extend(element.ports.iter().map(|port| state[port.unknown]));
-            input.extend(element.ports.iter().map(|port| derivative[port.unknown]));
-            input.extend(self.parameters.iter().map(|parameter| parameter.value));
+            let derivative_start = 1 + local;
+            let parameter_start = derivative_start + local;
+            let input = |index| match index {
+                0 => time,
+                i if i < derivative_start => state[element.ports[i - 1].unknown],
+                i if i < parameter_start => derivative[element.ports[i - derivative_start].unknown],
+                i => self.parameters[i - parameter_start].value,
+            };
             for equation in &element.equations {
-                let value = equation.expression.evaluate(&input)?;
-                residuals[equation.row] += value.value;
-                for (local_index, port) in element.ports.iter().enumerate() {
-                    push_nonzero(
-                        &mut state_coo,
-                        equation.row,
-                        port.unknown,
-                        value.gradient[1 + local_index],
-                    )?;
-                    push_nonzero(
-                        &mut derivative_coo,
-                        equation.row,
-                        port.unknown,
-                        value.gradient[1 + local + local_index],
-                    )?;
-                }
-                for parameter in 0..p {
-                    push_nonzero(
-                        &mut parameter_coo,
-                        equation.row,
-                        parameter,
-                        value.gradient[1 + 2 * local + parameter],
-                    )?;
+                let (value, gradient) = equation
+                    .expression
+                    .evaluate_sparse_at(parameter_start + p, input)?;
+                residuals[equation.row] += value;
+                for (index, value) in gradient.indices.into_iter().zip(gradient.values) {
+                    match index {
+                        0 => {}
+                        i if i < derivative_start => {
+                            state_coo.push(equation.row, element.ports[i - 1].unknown, value)?
+                        }
+                        i if i < parameter_start => derivative_coo.push(
+                            equation.row,
+                            element.ports[i - derivative_start].unknown,
+                            value,
+                        )?,
+                        i => parameter_coo.push(equation.row, i - parameter_start, value)?,
+                    }
                 }
             }
         }
@@ -261,18 +258,6 @@ impl EngineeringModel {
     ) -> Result<DaeEvaluation, OptimizeError> {
         Ok(self.assemble(time, state, derivative)?.to_dae_evaluation())
     }
-}
-
-fn push_nonzero(
-    coo: &mut CooMatrix<f64>,
-    row: usize,
-    column: usize,
-    value: f64,
-) -> Result<(), OptimizeError> {
-    if value != 0.0 {
-        coo.push(row, column, value)?;
-    }
-    Ok(())
 }
 
 fn unique_nonempty<'a>(

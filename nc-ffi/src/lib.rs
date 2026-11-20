@@ -73,6 +73,8 @@ mod nonlinear_decomposition;
 pub use nonlinear_decomposition::*;
 mod sparse_factorization;
 pub use sparse_factorization::*;
+mod engineering_adjoints;
+pub use engineering_adjoints::*;
 
 uniffi::setup_scaffolding!();
 

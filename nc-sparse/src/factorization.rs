@@ -355,45 +355,56 @@ fn factor_lu(
     let source = matrix_rows(matrix)?;
     let n = source.len();
     let mut rows = vec![BTreeMap::new(); n];
+    let mut column_rows = vec![BTreeSet::new(); n];
     let mut maximum_input: f64 = 0.0;
     for original_row in 0..n {
         let row = analysis.inverse_permutation[original_row];
         for (&original_column, &value) in &source[original_row] {
-            rows[row].insert(analysis.inverse_permutation[original_column], value);
+            let column = analysis.inverse_permutation[original_column];
+            rows[row].insert(column, value);
+            column_rows[column].insert(row);
             maximum_input = maximum_input.max(value.abs());
         }
     }
     let mut row_permutation: Vec<_> = (0..n).collect();
+    let mut row_position = row_permutation.clone();
     let mut interchanges = 0;
     let mut minimum_pivot = f64::INFINITY;
     for pivot in 0..n {
-        let selected = (pivot..n)
+        let targets = std::mem::take(&mut column_rows[pivot]);
+        let selected = targets
+            .iter()
+            .copied()
             .max_by(|&a, &b| {
-                rows[a]
-                    .get(&pivot)
-                    .copied()
-                    .unwrap_or(0.0)
+                rows[a][&pivot]
                     .abs()
-                    .total_cmp(&rows[b].get(&pivot).copied().unwrap_or(0.0).abs())
+                    .total_cmp(&rows[b][&pivot].abs())
+                    .then(row_position[a].cmp(&row_position[b]))
             })
-            .unwrap();
-        let pivot_value = rows[selected].get(&pivot).copied().unwrap_or(0.0);
+            .ok_or(SparseDirectError::Singular { pivot })?;
+        let pivot_value = rows[selected][&pivot];
         if pivot_value.abs() <= options.pivot_tolerance * maximum_input.max(1.0) {
             return Err(SparseDirectError::Singular { pivot });
         }
-        if selected != pivot {
-            rows.swap(selected, pivot);
-            row_permutation.swap(selected, pivot);
+        let position = row_position[selected];
+        if position != pivot {
+            let displaced = row_permutation[pivot];
+            row_permutation.swap(position, pivot);
+            row_position[selected] = pivot;
+            row_position[displaced] = position;
             interchanges += 1;
         }
-        let diagonal = rows[pivot][&pivot];
+        let diagonal = pivot_value;
         minimum_pivot = minimum_pivot.min(diagonal.abs());
-        let upper: Vec<_> = rows[pivot]
+        let upper: Vec<_> = rows[selected]
             .range((pivot + 1)..)
             .map(|(&c, &v)| (c, v))
             .collect();
-        for row in pivot + 1..n {
-            let entry = rows[row].get(&pivot).copied().unwrap_or(0.0);
+        for &(column, _) in &upper {
+            column_rows[column].remove(&selected);
+        }
+        for row in targets.into_iter().filter(|&row| row != selected) {
+            let entry = rows[row][&pivot];
             if entry == 0.0 {
                 continue;
             }
@@ -407,8 +418,10 @@ fn factor_lu(
                 }
                 if value.abs() <= options.drop_tolerance {
                     rows[row].remove(&column);
+                    column_rows[column].remove(&row);
                 } else {
                     rows[row].insert(column, value);
+                    column_rows[column].insert(row);
                 }
             }
         }
@@ -425,7 +438,11 @@ fn factor_lu(
         maximum_factor / maximum_input.max(f64::MIN_POSITIVE),
         interchanges,
     );
-    Ok((rows, row_permutation, diagnostics))
+    let ordered = row_permutation
+        .iter()
+        .map(|&r| std::mem::take(&mut rows[r]))
+        .collect();
+    Ok((ordered, row_permutation, diagnostics))
 }
 
 /// Reusable sparse LLᵀ factorization for symmetric positive definite systems.

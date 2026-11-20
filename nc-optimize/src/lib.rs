@@ -243,7 +243,13 @@ pub use engineering_model::{
 };
 pub mod engineering_sensitivity;
 pub use engineering_sensitivity::{
-    EngineeringResponseGradient, EngineeringResponseSensitivity, EngineeringSensitivityResult,
+    EngineeringAdjointResponse, EngineeringAdjointResult, EngineeringResponseGradient,
+    EngineeringResponseSensitivity, EngineeringSensitivityResult,
+};
+pub mod engineering_trajectory;
+pub use engineering_trajectory::{
+    EngineeringTrajectory, EngineeringTrajectoryOptions, EngineeringTrajectoryResponse,
+    EngineeringTrajectoryGradient, EngineeringTrajectoryAdjoints, EngineeringTrajectoryCheckpoint,
 };
 pub mod multiphysics_design;
 pub use multiphysics_design::{

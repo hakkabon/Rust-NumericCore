@@ -72,6 +72,8 @@ jobs:
           grep -q 'func solveNonlinearDecomposition' "${BINDINGS}"
           grep -q 'func analyzeSparseFactorization' "${BINDINGS}"
           grep -q 'public protocol FfiSparseFactorizationProtocol' "${BINDINGS}"
+          grep -q 'func solveEngineeringPointAdjoints' "${BINDINGS}"
+          grep -q 'func integrateEngineeringTrajectory' "${BINDINGS}"
 
       - name: Compute checksum
         id: checksum

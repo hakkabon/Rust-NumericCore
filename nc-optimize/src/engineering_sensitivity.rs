@@ -1,7 +1,9 @@
 //! Implicit forward and discrete-adjoint engineering sensitivities.
 
 use crate::{EngineeringAssembly, EngineeringModel, OptimizeError};
-use nc_sparse::{CooMatrix, CsrMatrix, SparseLu};
+use nc_sparse::{
+    CooMatrix, CsrMatrix, SparseLuFactorization, SparseNumericOptions, SparseOrdering,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineeringResponseGradient {
@@ -30,6 +32,21 @@ pub struct EngineeringSensitivityResult {
     pub operating_residual_norm: f64,
     pub maximum_forward_residual_norm: f64,
     pub derivative_sensitivity_factor: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineeringAdjointResponse {
+    pub name: String,
+    pub adjoint: Vec<f64>,
+    pub parameter_gradient: Vec<f64>,
+    pub adjoint_residual_norm: f64,
+    pub adjoint_backward_error: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineeringAdjointResult {
+    pub responses: Vec<EngineeringAdjointResponse>,
+    pub operating_residual_norm: f64,
 }
 
 impl EngineeringModel {
@@ -65,33 +82,43 @@ impl EngineeringModel {
         }
         let assembly = self.assemble(time, state, derivative)?;
         let tangent = effective_tangent(&assembly, alpha)?;
-        let factor = SparseLu::factor(&tangent, 0.0).map_err(direct_error)?;
+        let factor = SparseLuFactorization::factor(
+            &tangent,
+            SparseOrdering::MinimumDegree,
+            SparseNumericOptions {
+                pivot_tolerance: 0.0,
+                ..Default::default()
+            },
+        )
+        .map_err(direct_error)?;
+        let parameter_transpose = assembly.parameter_jacobian.transpose()?;
         let mut state_sensitivities = Vec::with_capacity(self.parameters.len());
         let mut maximum_forward_residual_norm: f64 = 0.0;
+        let mut entries = parameter_transpose.iter_entries().peekable();
         for parameter in 0..self.parameters.len() {
-            let parameter_column = column(&assembly.parameter_jacobian, parameter);
-            let rhs: Vec<f64> = parameter_column.iter().map(|value| -value).collect();
+            let mut rhs = vec![0.0; self.unknowns.len()];
+            while let Some(&(_, i, v)) = entries.peek().filter(|entry| entry.0 == parameter) {
+                rhs[i] -= v;
+                entries.next();
+            }
             let sensitivity = factor.solve(&rhs).map_err(direct_error)?;
             let product = tangent.spmv(&sensitivity)?;
             maximum_forward_residual_norm = maximum_forward_residual_norm.max(norm(
                 &product
                     .iter()
-                    .zip(&parameter_column)
-                    .map(|(lhs, rhs)| lhs + rhs)
+                    .zip(&rhs)
+                    .map(|(lhs, rhs)| lhs - rhs)
                     .collect::<Vec<_>>(),
             ));
             state_sensitivities.push(sensitivity);
         }
-        let transpose = tangent.transpose()?;
-        let transpose_factor = SparseLu::factor(&transpose, 0.0).map_err(direct_error)?;
-        let parameter_transpose = assembly.parameter_jacobian.transpose()?;
         let response_results = responses
             .iter()
             .map(|response| {
-                let adjoint = transpose_factor
-                    .solve(&response.state_gradient)
+                let adjoint = factor
+                    .solve_transpose(&response.state_gradient)
                     .map_err(direct_error)?;
-                let product = transpose.spmv(&adjoint)?;
+                let product = tangent.transpose_spmv(&adjoint)?;
                 let adjoint_residual_norm = norm(
                     &product
                         .iter()
@@ -142,9 +169,71 @@ impl EngineeringModel {
             derivative_sensitivity_factor: alpha,
         })
     }
+
+    /// One transposed tangent solve per response, with no forward sensitivity matrix.
+    pub fn adjoint_sensitivities(
+        &self,
+        time: f64,
+        state: &[f64],
+        derivative: &[f64],
+        alpha: f64,
+        responses: &[EngineeringResponseGradient],
+    ) -> Result<EngineeringAdjointResult, OptimizeError> {
+        let mut names = std::collections::BTreeSet::new();
+        if !alpha.is_finite()
+            || responses.is_empty()
+            || responses.iter().any(|response| {
+                response.name.is_empty()
+                    || !names.insert(response.name.as_str())
+                    || response.state_gradient.len() != self.unknowns.len()
+                    || response.direct_parameter_gradient.len() != self.parameters.len()
+                    || response
+                        .state_gradient
+                        .iter()
+                        .chain(&response.direct_parameter_gradient)
+                        .any(|v| !v.is_finite())
+            })
+        {
+            return Err(invalid("invalid engineering adjoint request"));
+        }
+        self.validate()?;
+        let assembly = self.assemble(time, state, derivative)?;
+        let factor = factor_tangent(&effective_tangent(&assembly, alpha)?)?;
+        let responses = responses
+            .iter()
+            .map(|request| {
+                let report = factor
+                    .solve_transpose_refined(&request.state_gradient)
+                    .map_err(direct_error)?;
+                let implicit = assembly
+                    .parameter_jacobian
+                    .transpose_spmv(&report.solution)?;
+                let parameter_gradient = request
+                    .direct_parameter_gradient
+                    .iter()
+                    .zip(implicit)
+                    .map(|(direct, implicit)| direct - implicit)
+                    .collect::<Vec<_>>();
+                if !parameter_gradient.iter().all(|v| v.is_finite()) {
+                    return Err(invalid("non-finite engineering parameter gradient"));
+                }
+                Ok(EngineeringAdjointResponse {
+                    name: request.name.clone(),
+                    adjoint: report.solution,
+                    parameter_gradient,
+                    adjoint_residual_norm: report.residual_norm,
+                    adjoint_backward_error: report.backward_error,
+                })
+            })
+            .collect::<Result<_, OptimizeError>>()?;
+        Ok(EngineeringAdjointResult {
+            responses,
+            operating_residual_norm: norm(&assembly.residuals),
+        })
+    }
 }
 
-fn effective_tangent(
+pub(crate) fn effective_tangent(
     assembly: &EngineeringAssembly,
     alpha: f64,
 ) -> Result<CsrMatrix<f64>, OptimizeError> {
@@ -163,21 +252,24 @@ fn effective_tangent(
     Ok(coo.to_csr()?)
 }
 
-fn column(matrix: &CsrMatrix<f64>, target: usize) -> Vec<f64> {
-    let mut result = vec![0.0; matrix.rows()];
-    for (row, column, value) in matrix.iter_entries() {
-        if column == target {
-            result[row] = value;
-        }
-    }
-    result
+pub(crate) fn factor_tangent(
+    matrix: &CsrMatrix<f64>,
+) -> Result<SparseLuFactorization, OptimizeError> {
+    SparseLuFactorization::factor(
+        matrix,
+        SparseOrdering::MinimumDegree,
+        SparseNumericOptions::default(),
+    )
+    .map_err(direct_error)
 }
 
 fn norm(values: &[f64]) -> f64 {
-    values.iter().map(|value| value * value).sum::<f64>().sqrt()
+    values
+        .iter()
+        .fold(0.0_f64, |norm, &value| norm.hypot(value))
 }
 
-fn direct_error(error: nc_sparse::SparseDirectError) -> OptimizeError {
+pub(crate) fn direct_error(error: nc_sparse::SparseDirectError) -> OptimizeError {
     invalid(&format!(
         "engineering sensitivity factorization failed: {error}"
     ))

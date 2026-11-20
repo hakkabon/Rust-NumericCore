@@ -343,7 +343,7 @@ pub fn optimize_multiphysics_design(
         inputs.extend(&parameters);
         let response = problem.response.evaluate(&inputs)?;
         let n = steady.state.len();
-        let sensitivity = model.engineering_model.sensitivities(
+        let sensitivity = model.engineering_model.adjoint_sensitivities(
             0.0,
             &steady.state,
             &vec![0.0; n],

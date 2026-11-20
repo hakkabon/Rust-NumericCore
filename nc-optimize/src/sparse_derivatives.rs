@@ -66,7 +66,19 @@ impl NonlinearExpression {
         &self,
         parameters: &[f64],
     ) -> Result<(f64, SparseDerivative), OptimizeError> {
-        let values = primal_values(self, parameters)?;
+        if !parameters.iter().all(|v| v.is_finite()) {
+            return Err(invalid("parameters must be finite"));
+        }
+        self.evaluate_sparse_at(parameters.len(), |i| parameters[i])
+    }
+
+    /// Look up only referenced inputs when a local graph uses a global index space.
+    pub(crate) fn evaluate_sparse_at(
+        &self,
+        dimension: usize,
+        input: impl Fn(usize) -> f64,
+    ) -> Result<(f64, SparseDerivative), OptimizeError> {
+        let values = primal_values(self, dimension, input)?;
         let output_value = values[self.output];
         let mut adjoints = vec![0.0; self.nodes.len()];
         adjoints[self.output] = 1.0;
@@ -120,7 +132,7 @@ impl NonlinearExpression {
         Ok((
             output_value,
             SparseDerivative {
-                dimension: parameters.len(),
+                dimension,
                 indices,
                 values,
             },
@@ -242,15 +254,13 @@ impl NonlinearModel {
 
 fn primal_values(
     expression: &NonlinearExpression,
-    parameters: &[f64],
+    dimension: usize,
+    input: impl Fn(usize) -> f64,
 ) -> Result<Vec<f64>, OptimizeError> {
-    expression.validate(parameters.len())?;
-    if !parameters.iter().all(|v| v.is_finite()) {
-        return Err(invalid("parameters must be finite"));
-    }
+    expression.validate(dimension)?;
     let mut values = Vec::with_capacity(expression.nodes.len());
     for (index, node) in expression.nodes.iter().enumerate() {
-        let value = node_value(node, &values, parameters);
+        let value = node_value(node, &values, &input);
         if !value.is_finite() {
             return Err(invalid("expression evaluation produced a non-finite value"));
         }
@@ -262,10 +272,10 @@ fn primal_values(
     Ok(values)
 }
 
-fn node_value(node: &NonlinearNode, v: &[f64], p: &[f64]) -> f64 {
+fn node_value(node: &NonlinearNode, v: &[f64], input: &impl Fn(usize) -> f64) -> f64 {
     match *node {
         NonlinearNode::Constant(x) => x,
-        NonlinearNode::Parameter(i) => p[i],
+        NonlinearNode::Parameter(i) => input(i),
         NonlinearNode::Add(a, b) => v[a] + v[b],
         NonlinearNode::Subtract(a, b) => v[a] - v[b],
         NonlinearNode::Multiply(a, b) => v[a] * v[b],
