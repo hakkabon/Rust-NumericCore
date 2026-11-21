@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.42.0"
+version = "0.43.0"
 edition = "2021"
 authors = ["hakkabon"]
 license = "MIT OR Apache-2.0"
@@ -28,6 +28,8 @@ nc-decomp = { path = "nc-decomp" }
 nc-iterative = { path = "nc-iterative" }
 nc-optimize = { path = "nc-optimize" }
 thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [profile.release]
 lto = true

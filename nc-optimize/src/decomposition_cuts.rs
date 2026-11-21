@@ -61,7 +61,7 @@ pub enum CutInsertion {
 /// Keeps immutable cut IDs in insertion order. Duplicate checking compares
 /// exact canonical inequalities within the same scope. The coordinator is
 /// responsible for cut derivation and for rebuilding a master after deletion.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct DecompositionCutPool {
     next_id: CutId,
     entries: BTreeMap<CutId, CutPoolEntry>,

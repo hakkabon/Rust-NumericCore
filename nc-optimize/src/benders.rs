@@ -429,7 +429,7 @@ pub fn solve_benders(
     Ok(result)
 }
 
-fn validate(problem: &BendersProblem, options: BendersOptions) -> Result<Vec<f64>, OptimizeError> {
+pub(crate) fn validate(problem: &BendersProblem, options: BendersOptions) -> Result<Vec<f64>, OptimizeError> {
     let continuous = |p: &Problem| -> Result<(), OptimizeError> {
         p.validate()?;
         if p.is_integer.iter().any(|&flag| flag) {
@@ -550,7 +550,7 @@ pub(crate) fn recourse_floor(
     })
 }
 
-fn make_master(
+pub(crate) fn make_master(
     first: &Problem,
     weights: &[f64],
     floors: &[f64],
@@ -793,7 +793,7 @@ pub(crate) fn affine(s: &BendersScenario, row: &[f64], column: &[f64]) -> Result
     Ok(Affine { constant, slope })
 }
 
-fn box_minimum(coefficients: &[f64], bounds: &[Bound]) -> Option<f64> {
+pub(crate) fn box_minimum(coefficients: &[f64], bounds: &[Bound]) -> Option<f64> {
     let mut minimum = 0.0;
     for (&coefficient, bound) in coefficients.iter().zip(bounds) {
         if coefficient > 0.0 {

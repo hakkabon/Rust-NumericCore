@@ -24,6 +24,7 @@ pub use simplex::RevisedSimplexSolver;
 pub mod lp_decomposition;
 pub mod decomposition_cuts;
 pub mod benders;
+pub mod distributed_benders;
 mod benders_tree;
 pub mod integer_benders;
 pub mod stochastic;

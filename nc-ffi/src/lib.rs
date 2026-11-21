@@ -75,6 +75,8 @@ mod sparse_factorization;
 pub use sparse_factorization::*;
 mod engineering_adjoints;
 pub use engineering_adjoints::*;
+mod distributed_benders;
+pub use distributed_benders::*;
 
 uniffi::setup_scaffolding!();
 

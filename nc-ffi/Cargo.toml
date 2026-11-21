@@ -18,6 +18,8 @@ nc-kernels-generic.workspace = true
 nc-optimize.workspace = true
 uniffi = "0.27"
 thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [features]
 # Isolated behind a feature flag rather than always-on: the "cli" feature

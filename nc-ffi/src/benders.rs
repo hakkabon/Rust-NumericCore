@@ -149,19 +149,7 @@ pub fn solve_benders_decomposition(
             opt::BendersTermination::MasterUnbounded => FfiBendersTermination::MasterUnbounded,
             opt::BendersTermination::Stalled => FfiBendersTermination::Stalled,
         },
-        incumbent: result.incumbent.map(|incumbent| FfiBendersIncumbent {
-            first_stage: incumbent.first_stage,
-            objective: incumbent.objective,
-            recourse: incumbent
-                .recourse
-                .into_iter()
-                .map(|scenario| FfiBendersRecourseSolution {
-                    id: ffi_id(scenario.id),
-                    point: scenario.point,
-                    objective: scenario.objective,
-                })
-                .collect(),
-        }),
+        incumbent: result.incumbent.map(ffi_benders_incumbent),
         lower_bound: result.lower_bound,
         upper_bound: result.upper_bound,
         absolute_gap: result.absolute_gap,
@@ -182,4 +170,16 @@ pub fn solve_benders_decomposition(
             })
             .collect(),
     })
+}
+
+pub(crate) fn ffi_benders_incumbent(incumbent: opt::BendersIncumbent) -> FfiBendersIncumbent {
+    FfiBendersIncumbent {
+        first_stage: incumbent.first_stage,
+        objective: incumbent.objective,
+        recourse: incumbent.recourse.into_iter().map(|r| FfiBendersRecourseSolution {
+            id: FfiLpSubproblemId { name: r.id.name, scenario: r.id.scenario },
+            point: r.point,
+            objective: r.objective,
+        }).collect(),
+    }
 }

@@ -74,6 +74,8 @@ jobs:
           grep -q 'public protocol FfiSparseFactorizationProtocol' "${BINDINGS}"
           grep -q 'func solveEngineeringPointAdjoints' "${BINDINGS}"
           grep -q 'func integrateEngineeringTrajectory' "${BINDINGS}"
+          grep -q 'func startDistributedBenders' "${BINDINGS}"
+          grep -q 'func verifyDistributedBenders' "${BINDINGS}"
 
       - name: Compute checksum
         id: checksum
