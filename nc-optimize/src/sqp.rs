@@ -590,14 +590,31 @@ fn bfgs_update(hessian: &mut Vec<Vec<f64>>, step: &[f64], y: &[f64], regularizat
     let bs = matvec(hessian, step);
     let sbs = dot(step, &bs);
     let sy = dot(step, y);
-    let scale = inf_norm(step).max(1.0) * inf_norm(y).max(1.0);
-    if !sbs.is_finite() || !sy.is_finite() || sbs <= regularization || sy <= 1e-10 * scale {
+    if !sbs.is_finite() || !sy.is_finite() || sbs <= 0.0 {
         *hessian = identity(step.len());
         return;
     }
+    if sbs <= regularization {
+        return;
+    }
+    // Powell damping enforces sᵀȳ ≥ 0.2 sᵀBs while retaining the old curvature.
+    let theta = if sy >= 0.2 * sbs { 1.0 } else { 0.8 / (1.0 - sy / sbs) };
+    let adjusted: Vec<_> = y.iter().zip(&bs).map(|(y, bs)| theta * y + (1.0 - theta) * bs).collect();
+    let curvature = dot(step, &adjusted);
+    if !curvature.is_finite() || curvature <= 0.0 {
+        return;
+    }
+    let y_scale = curvature.sqrt();
+    let bs_scale = sbs.sqrt();
     for i in 0..step.len() {
         for j in 0..step.len() {
-            hessian[i][j] += y[i] * y[j] / sy - bs[i] * bs[j] / sbs;
+            let value = hessian[i][j] + (adjusted[i] / y_scale) * (adjusted[j] / y_scale)
+                - (bs[i] / bs_scale) * (bs[j] / bs_scale);
+            if !value.is_finite() {
+                *hessian = identity(step.len());
+                return;
+            }
+            hessian[i][j] = value;
         }
     }
     regularize(hessian, regularization);
@@ -717,6 +734,14 @@ fn invalid(message: &str) -> OptimizeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn powell_damping_retains_curvature_in_unaffected_directions() {
+        let mut hessian = vec![vec![4.0, 0.0], vec![0.0, 3.0]];
+        bfgs_update(&mut hessian, &[1.0, 0.0], &[-2.0, 0.0], 1e-9);
+        assert!((hessian[0][0] - 0.8).abs() < 1e-12);
+        assert_eq!(hessian[1][1], 3.0);
+    }
     use crate::{NonlinearConstraint, NonlinearExpression, NonlinearModel, NonlinearNode::*};
 
     fn expression(nodes: Vec<crate::NonlinearNode>) -> NonlinearExpression {
