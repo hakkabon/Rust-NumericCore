@@ -31,7 +31,7 @@ pub struct CertificateMetric {
 impl CertificateMetric {
     fn new(name: &str, value: f64, tolerance: f64) -> Self {
         Self { name: name.into(), value, tolerance,
-            passed: value.is_finite() && value <= tolerance }
+            passed: value.is_finite() && value >= 0.0 && value <= tolerance }
     }
 }
 
@@ -43,12 +43,15 @@ pub struct OptimizationCertificate {
     pub warnings: Vec<String>,
 }
 impl OptimizationCertificate {
+    /// Whether the evidence for the reported claim passed its checks.
     pub fn verified(&self) -> bool {
         self.finite && matches!(self.claim, CertificateClaim::Optimality | CertificateClaim::Feasibility)
             && !self.metrics.is_empty() && self.metrics.iter().all(|metric| metric.passed)
     }
 }
 
+/// Recompute primal feasibility and objective agreement. A caller-supplied
+/// gap is checked as a scalar and cannot upgrade the claim to optimality.
 pub fn certify_linear_solution(problem: &Problem, solution: &Solution,
     global_gap: Option<f64>, tolerance: CertificateTolerance)
     -> Result<OptimizationCertificate, OptimizeError> {
@@ -61,17 +64,25 @@ pub fn certify_linear_solution(problem: &Problem, solution: &Solution,
         CertificateMetric::new("objective reconstruction", diagnostics.objective_error, tolerance.objective),
     ];
     if let Some(gap) = global_gap {
-        metrics.push(CertificateMetric::new("global bound gap", gap.abs(), tolerance.gap));
+        metrics.push(CertificateMetric::new("caller-supplied gap", gap, tolerance.gap));
     }
-    let finite = diagnostics.finite && metrics.iter().all(|metric| metric.value.is_finite());
-    let passed = finite && metrics.iter().all(|metric| metric.passed);
+    let finite = diagnostics.finite && metrics.iter().all(|metric| metric.value.is_finite())
+        && problem.row_bounds.iter().chain(&problem.var_bounds).all(|bound| {
+            bound.lower.is_none_or(f64::is_finite) && bound.upper.is_none_or(f64::is_finite)
+        });
+    let ordered_bounds = problem.row_bounds.iter().chain(&problem.var_bounds)
+        .all(|bound| !matches!((bound.lower, bound.upper), (Some(lo), Some(hi)) if lo > hi));
+    let passed = finite && ordered_bounds && metrics.iter().all(|metric| metric.passed);
     let mut warnings = Vec::new();
     let claim = if solution.status != SolveStatus::Optimal || !passed {
         CertificateClaim::Rejected
-    } else if global_gap.is_some() {
-        CertificateClaim::Optimality
     } else {
-        warnings.push("dual or global-bound evidence unavailable; certifying feasibility only".into());
+        let warning = if global_gap.is_some() {
+            "caller-supplied gap passed its scalar check; certifying feasibility only"
+        } else {
+            "dual or global-bound evidence unavailable; certifying feasibility only"
+        };
+        warnings.push(warning.into());
         CertificateClaim::Feasibility
     };
     Ok(OptimizationCertificate { claim, finite, metrics, warnings })
@@ -126,6 +137,7 @@ pub fn certify_convex_qp(problem: &QuadraticProblem, result: &QuadraticResult,
         CertificateMetric::new("objective reconstruction", objective_error, tolerance.objective),
     ];
     let finite = result.point.iter().chain(&result.row_dual).chain(&result.variable_dual)
+        .chain(&activities).chain(&gradient)
         .all(|value| value.is_finite()) && metrics.iter().all(|metric| metric.value.is_finite());
     let mut warnings = Vec::new();
     let active_count = active_rows.len();
@@ -190,7 +202,7 @@ fn validate_tolerance(value: CertificateTolerance) -> Result<(), OptimizeError> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{solve_convex_qp, QuadraticOptions};
+    use crate::{solve_convex_qp, QuadraticOptions, QuadraticTermination};
     use nc_sparse::CsrMatrix;
 
     #[test]
@@ -213,16 +225,50 @@ mod tests {
     fn linear_certificate_does_not_invent_dual_evidence() {
         let problem = Problem { objective: vec![1.0],
             constraints: CsrMatrix::new(0, 1, vec![0], vec![], vec![]).unwrap(),
-            row_bounds: vec![], var_bounds: vec![Bound::fixed(2.0)], is_integer: vec![false] };
+            row_bounds: vec![], var_bounds: vec![Bound { lower: Some(0.0), upper: Some(2.0) }],
+            is_integer: vec![false] };
         let solution = Solution { variable_values: vec![2.0], objective_value: 2.0,
             status: SolveStatus::Optimal };
         let feasible = certify_linear_solution(&problem, &solution, None, Default::default()).unwrap();
         assert_eq!(feasible.claim, CertificateClaim::Feasibility);
         assert!(feasible.verified());
-        let optimal = certify_linear_solution(&problem, &solution, Some(0.0), Default::default()).unwrap();
-        assert_eq!(optimal.claim, CertificateClaim::Optimality);
-        let rejected = certify_linear_solution(&problem, &solution, Some(f64::NAN), Default::default()).unwrap();
-        assert_eq!(rejected.claim, CertificateClaim::Rejected);
-        assert!(!rejected.finite);
+        let supplied = certify_linear_solution(&problem, &solution, Some(0.0), Default::default()).unwrap();
+        assert_eq!(supplied.claim, CertificateClaim::Feasibility);
+        assert!(supplied.verified());
+        assert_eq!(supplied.metrics.last().unwrap().name, "caller-supplied gap");
+        for gap in [f64::NAN, -1e-12, 1e-3] {
+            let rejected = certify_linear_solution(&problem, &solution, Some(gap), Default::default()).unwrap();
+            assert_eq!(rejected.claim, CertificateClaim::Rejected);
+            assert_eq!(rejected.finite, gap.is_finite());
+        }
+    }
+
+    #[test]
+    fn convex_qp_rejects_nonfinite_reconstructed_stationarity() {
+        let problem = QuadraticProblem {
+            quadratic: vec![vec![0.0; 2]; 2],
+            linear: vec![0.0; 2],
+            constant: 0.0,
+            constraints: CsrMatrix::new(2, 2, vec![0, 1, 2], vec![1, 1], vec![f64::MAX; 2]).unwrap(),
+            row_bounds: vec![Bound::fixed(0.0); 2],
+            variable_bounds: vec![Bound::free(); 2],
+        };
+        let result = QuadraticResult {
+            point: vec![0.0; 2],
+            objective: 0.0,
+            row_activity: vec![0.0; 2],
+            row_dual: vec![2.0, -2.0],
+            variable_dual: vec![0.0; 2],
+            iterations: 0,
+            termination: QuadraticTermination::Converged,
+            primal_residual: 0.0,
+            dual_residual: 0.0,
+            stationarity_norm: 0.0,
+            maximum_row_violation: 0.0,
+            maximum_variable_violation: 0.0,
+        };
+        let certificate = certify_convex_qp(&problem, &result, CertificateTolerance::default()).unwrap();
+        assert_eq!(certificate.claim, CertificateClaim::Rejected);
+        assert!(!certificate.finite);
     }
 }

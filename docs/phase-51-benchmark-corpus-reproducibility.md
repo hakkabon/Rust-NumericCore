@@ -10,7 +10,11 @@ The tiers are cumulative:
 
 - `smoke` contains the four fast LP, QP, MILP, and nonlinear checks.
 - `standard` adds transformations, mixed-scale sparse operations,
-  reproducibility, NIST StRD Misra1a, and CUTEst HS71.
+  reproducibility, NIST StRD Misra1a, and CUTEst HS71. The release checks also
+  cover a caller-supplied LP gap, Benders limits and proof replay, sparse LU
+  forward and backward errors across twelve orders of row scaling, and a
+  checkpointed adjoint against central differences of a reference
+  backward-Euler recurrence.
 - `extended` is the expansion point for larger licensed corpora and scheduled
   validation; it currently includes the complete standard suite.
 

@@ -21,6 +21,8 @@ use crate::{
 };
 use nc_sparse::CsrMatrix;
 
+mod release_cases;
+
 /// Run small, hand-checkable LP, QP, MILP, and nonlinear cases. The returned
 /// report is structured so CI and downstream applications can retain evidence,
 /// rather than relying only on assertions or solver termination flags.
@@ -491,6 +493,7 @@ pub fn run_reference_validation() -> Result<ValidationReport, OptimizeError> {
         multiphysics_case,
         perturbation_case,
     ];
+    cases.extend(release_cases::run()?);
     cases.extend(crate::run_external_reference_validation()?);
     Ok(ValidationReport::new(cases))
 }
@@ -503,11 +506,11 @@ mod tests {
     fn production_reference_program_passes() {
         let report = run_reference_validation().unwrap();
         assert!(report.passed(), "{report:#?}");
-        assert_eq!(report.cases.len(), 16);
+        assert_eq!(report.cases.len(), 21);
         assert_eq!(report.failure_count(), 0);
         assert!(report.maximum_normalized_error() <= 1.0);
         assert_eq!(report.for_tier(ValidationTier::Smoke).cases.len(), 4);
-        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 16);
+        assert_eq!(report.for_tier(ValidationTier::Standard).cases.len(), 21);
 
         let first = report.snapshot("rust", ValidationTier::Standard);
         let second = run_reference_validation()
