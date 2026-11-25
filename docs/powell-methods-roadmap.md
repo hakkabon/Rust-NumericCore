@@ -65,14 +65,29 @@ On the curved-constraint fixture, both methods reached an objective near
 one within the same 220-call budget and feasibility tolerance. COBYLA
 used 71 calls and the existing constrained derivative-free method used 219.
 
-Implement LINCOA for a black-box objective with explicit linear inequalities.
-Compare feasibility and evaluation counts on active-set changes, dependent
-rows, and poorly scaled constraints.
+`minimize_lincoa` in Rust and `LincoaSolver` in Swift use Basin 3.6.0's
+LINCOA for a value-only objective over continuous linear inequalities.
+Both use the existing sparse linear model for the feasible region. The
+callback supplies the objective, so the model's linear cost is unused.
+NumericCore eliminates fixed coordinates, translates the constraints about
+the feasible starting point, scales the rows, and passes a dense constraint
+block to Basin. Nonconstant equality rows and integer variables are unsupported.
+
+The objective may be evaluated outside the constraints and bounds during
+interpolation. NumericCore recomputes feasibility from the original rows
+and bounds using the requested absolute tolerance and returns the best
+eligible evaluation. The evaluation budget includes initialization. Reaching
+the final radius describes resolution. The contract suite checks active-set
+changes with a dependent row scaled from `1e-160` to `1e160` and compares
+LINCOA and COBYLA on the same linear model under a shared 100-call budget
+and feasibility tolerance. Both reached the analytical objective of 2.125
+within `1e-6`. LINCOA used 29 calls and COBYLA used 13 on that fixture.
 
 [Powell's COBYLA chapter](https://link.springer.com/chapter/10.1007/978-94-015-8330-5_4) ·
 [Basin COBYLA](https://docs.rs/basin/3.6.0/basin/struct.Cobyla.html) ·
 [Third-party notice](../third-party/basin/COPYRIGHT) ·
-[Powell's LINCOA subproblem paper](https://link.springer.com/article/10.1007/s12532-015-0084-4)
+[Powell's LINCOA subproblem paper](https://link.springer.com/article/10.1007/s12532-015-0084-4) ·
+[Basin LINCOA](https://docs.rs/basin/3.6.0/basin/struct.Lincoa.html)
 
 ## 3. NEWUOA and UOBYQA
 

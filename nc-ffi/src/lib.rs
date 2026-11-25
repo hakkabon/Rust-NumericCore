@@ -71,6 +71,8 @@ mod bobyqa;
 pub use bobyqa::*;
 mod cobyla;
 pub use cobyla::*;
+mod lincoa;
+pub use lincoa::*;
 mod stochastic;
 pub use stochastic::*;
 mod nonlinear_decomposition;

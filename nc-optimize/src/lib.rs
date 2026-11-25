@@ -28,6 +28,8 @@ pub mod bobyqa;
 pub use bobyqa::{minimize_bobyqa, BobyqaOptions, BobyqaResult, BobyqaTermination};
 pub mod cobyla;
 pub use cobyla::{minimize_cobyla, CobylaOptions, CobylaResult, CobylaTermination};
+pub mod lincoa;
+pub use lincoa::{minimize_lincoa, LincoaOptions, LincoaResult, LincoaTermination};
 pub mod distributed_benders;
 mod benders_tree;
 pub mod integer_benders;
