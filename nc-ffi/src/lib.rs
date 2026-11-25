@@ -75,6 +75,8 @@ mod lincoa;
 pub use lincoa::*;
 mod powell_unconstrained;
 pub use powell_unconstrained::*;
+mod powell_hybrid;
+pub use powell_hybrid::*;
 mod stochastic;
 pub use stochastic::*;
 mod nonlinear_decomposition;

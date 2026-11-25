@@ -238,7 +238,8 @@ pub use nonlinear_equations::{continue_solution, solve_equation_model, solve_new
     solve_pseudo_transient_with_observer, ContinuationOptions, ContinuationResult,
     ContinuationStage, NonlinearEquationModel, NonlinearSystemEvaluation,
     NonlinearSystemIteration, NonlinearSystemOptions, NonlinearSystemResult,
-    NonlinearSystemTermination, PseudoTransientOptions};
+    NonlinearSystemTermination, PseudoTransientOptions, solve_powell_hybrid,
+    solve_powell_hybrid_model, PowellHybridOptions, PowellHybridResult, PowellHybridTermination};
 
 pub mod time_integration;
 pub use time_integration::{

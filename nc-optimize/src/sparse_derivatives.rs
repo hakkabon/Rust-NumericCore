@@ -61,6 +61,12 @@ impl SparseJacobian {
 }
 
 impl NonlinearExpression {
+    /// Evaluate the graph without allocating or evaluating derivatives.
+    pub(crate) fn evaluate_value(&self, parameters: &[f64]) -> Result<f64, OptimizeError> {
+        let values = primal_values(self, parameters.len(), |i| parameters[i])?;
+        Ok(values[self.output])
+    }
+
     /// Value and sparse gradient via one primal and one reverse graph sweep.
     pub fn evaluate_sparse(
         &self,

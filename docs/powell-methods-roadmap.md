@@ -115,11 +115,25 @@ two-variable Rosenbrock problem.
 
 ## 4. Powell hybrid method
 
-Add a Jacobian-based trust-region dogleg method for square root systems.
-Use rank-one Jacobian updates between refreshes and distinguish residual
-convergence from a small step with a nonzero residual. Validate against
-the existing Newton solver and MINPACK reference cases before deciding
-whether to add a finite-difference entry point.
+`solve_powell_hybrid` in Rust and `NonlinearSystemSolver.solvePowellHybrid`
+in Swift provide a dense dogleg method for square systems with analytic
+Jacobians. The step combines the Newton and scaled steepest-descent
+directions inside a trust region. The solver applies good Broyden updates
+between analytic refreshes and refreshes after repeated poor reduction.
+It refactors the current dense Jacobian by QR when computing the Newton
+endpoint. The equation-graph entry point evaluates values at trial points
+and differentiates the graph at Jacobian refreshes.
+
+The result records the weighted residual norm, trial iterations, residual
+calls, analytic Jacobian calls, and rank-one updates. Only reaching the
+residual tolerance reports convergence. A small step or radius with a
+remaining residual reports a stall. The contract suite includes the
+MINPACK tridiagonal example, Rosenbrock equations, a scaled rank-deficient
+system, and a stationary point with no root. On the nine-variable MINPACK
+example, hybrid used 12 residual calls and one analytic Jacobian call.
+Damped Newton reached the same root using six combined residual-and-Jacobian
+calls from the same starting point. A finite-difference Jacobian entry point
+remains a separate extension.
 
 [Argonne MINPACK guide](https://www.mcs.anl.gov/~more/ANL8074b.pdf)
 

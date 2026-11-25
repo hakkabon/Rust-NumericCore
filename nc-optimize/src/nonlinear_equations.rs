@@ -1,6 +1,12 @@
 //! Square nonlinear equation systems, Newton-Krylov, and continuation.
 
 use crate::{NonlinearExpression, OptimizeError};
+mod powell_hybrid;
+pub use powell_hybrid::{
+    solve_powell_hybrid, solve_powell_hybrid_model, PowellHybridOptions, PowellHybridResult,
+    PowellHybridTermination,
+};
+
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NonlinearSystemEvaluation {
@@ -757,22 +763,22 @@ fn validate(x: &[f64], o: &NonlinearSystemOptions) -> Result<(Vec<f64>, Vec<f64>
     {
         return Err(invalid("invalid nonlinear-system options"));
     }
-    fn scale(values: &[f64], n: usize) -> Result<Vec<f64>, OptimizeError> {
-        let result = if values.is_empty() {
-            vec![1.0; n]
-        } else {
-            values.to_vec()
-        };
-        if result.len() != n || !result.iter().all(|v| positive(*v)) {
-            Err(invalid("scales must be positive and dimension-matched"))
-        } else {
-            Ok(result)
-        }
-    }
     Ok((
         scale(&o.variable_scale, x.len())?,
         scale(&o.residual_scale, x.len())?,
     ))
+}
+fn scale(values: &[f64], n: usize) -> Result<Vec<f64>, OptimizeError> {
+    let result = if values.is_empty() {
+        vec![1.0; n]
+    } else {
+        values.to_vec()
+    };
+    if result.len() != n || !result.iter().all(|v| positive(*v)) {
+        Err(invalid("scales must be positive and dimension-matched"))
+    } else {
+        Ok(result)
+    }
 }
 fn checked_evaluation<F>(
     f: &mut F,

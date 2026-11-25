@@ -81,6 +81,8 @@ jobs:
           grep -q 'func solveLincoa' "${BINDINGS}"
           grep -q 'func solveNewuoa' "${BINDINGS}"
           grep -q 'func solveUobyqa' "${BINDINGS}"
+          grep -q 'func runPowellHybrid(' "${BINDINGS}"
+          grep -q 'func runPowellHybridModel(' "${BINDINGS}"
 
       - name: Compute checksum
         id: checksum
