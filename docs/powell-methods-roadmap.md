@@ -43,14 +43,35 @@ the same fixture.
 
 ## 2. COBYLA and LINCOA
 
-Implement COBYLA's simplex interpolation and constraint-aware trust-region
-subproblem for black-box inequalities. Compare behavior from infeasible
-starts and at active constraints. Evaluate equality handling separately.
+`minimize_cobyla` in Rust and `CobylaSolver` in Swift share Basin 3.6.0's
+PRIMA-based implementation. It uses simplex interpolation and a
+constraint-aware trust-region step. One callback returns the objective
+and all residuals for a point. Inequality residuals use `c(x) <= 0`, and
+equality residuals become two inequalities of opposite sign.
+
+NumericCore eliminates fixed coordinates and restores them for each callback.
+COBYLA can evaluate points outside the variable bounds and nonlinear
+constraints. The evaluation cap includes simplex initialization, and the
+result reports the best feasible evaluation under the configured tolerance
+or the least-violating evaluation when the run found no feasible point.
+The original residuals, maximum violation, and feasibility flag accompany
+the termination reason. Reaching the final radius describes resolution.
+Model values must be finite with magnitude at most `2^100`.
+
+The contract suite checks an infeasible start with a curved active
+constraint, equality restoration with a fixed coordinate, a budget too
+small to initialize the simplex, and malformed or throwing callbacks.
+On the curved-constraint fixture, both methods reached an objective near
+one within the same 220-call budget and feasibility tolerance. COBYLA
+used 71 calls and the existing constrained derivative-free method used 219.
+
 Implement LINCOA for a black-box objective with explicit linear inequalities.
 Compare feasibility and evaluation counts on active-set changes, dependent
 rows, and poorly scaled constraints.
 
 [Powell's COBYLA chapter](https://link.springer.com/chapter/10.1007/978-94-015-8330-5_4) ·
+[Basin COBYLA](https://docs.rs/basin/3.6.0/basin/struct.Cobyla.html) ·
+[Third-party notice](../third-party/basin/COPYRIGHT) ·
 [Powell's LINCOA subproblem paper](https://link.springer.com/article/10.1007/s12532-015-0084-4)
 
 ## 3. NEWUOA and UOBYQA

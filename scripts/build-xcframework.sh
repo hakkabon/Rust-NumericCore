@@ -87,6 +87,9 @@ xcodebuild -create-xcframework \
 
 cp third-party/bobyqa/LICENSE-MIT "${OUT_DIR}/NumericCoreFFI.xcframework/BOBYQA-LICENSE.txt"
 cp third-party/bobyqa/PRIMA-NOTICE "${OUT_DIR}/NumericCoreFFI.xcframework/BOBYQA-PRIMA-NOTICE.txt"
+cp third-party/basin/LICENSE-MIT "${OUT_DIR}/NumericCoreFFI.xcframework/BASIN-LICENSE.txt"
+cp third-party/basin/LICENSE-APACHE "${OUT_DIR}/NumericCoreFFI.xcframework/BASIN-LICENSE-APACHE.txt"
+cp third-party/basin/COPYRIGHT "${OUT_DIR}/NumericCoreFFI.xcframework/BASIN-NOTICE.txt"
 
 echo "==> Zipping for release upload"
 (cd "${OUT_DIR}" && zip -r NumericCoreFFI.xcframework.zip NumericCoreFFI.xcframework)

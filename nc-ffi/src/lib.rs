@@ -69,6 +69,8 @@ mod integer_benders;
 pub use integer_benders::*;
 mod bobyqa;
 pub use bobyqa::*;
+mod cobyla;
+pub use cobyla::*;
 mod stochastic;
 pub use stochastic::*;
 mod nonlinear_decomposition;

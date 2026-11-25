@@ -35,6 +35,7 @@ pub const API_COMPATIBILITY_EPOCH: u32 = 1;
 pub const CAPABILITIES: &[Capability] = &[
     capability("benders-decomposition", ApiStability::Provisional),
     capability("bobyqa", ApiStability::Provisional),
+    capability("cobyla", ApiStability::Provisional),
     capability("dae-integration", ApiStability::Provisional),
     capability("dense-linear-algebra", ApiStability::Stable),
     capability("distributed-benders", ApiStability::Provisional),
@@ -95,6 +96,7 @@ mod tests {
             vec![
                 "benders-decomposition",
                 "bobyqa",
+                "cobyla",
                 "dae-integration",
                 "dense-linear-algebra",
                 "distributed-benders",
