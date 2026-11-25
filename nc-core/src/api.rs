@@ -49,6 +49,7 @@ pub const CAPABILITIES: &[Capability] = &[
     capability("lp-decomposition", ApiStability::Provisional),
     capability("lp-qp-milp", ApiStability::Stable),
     capability("multiphysics-design", ApiStability::Experimental),
+    capability("newuoa", ApiStability::Provisional),
     capability("nonlinear-decomposition", ApiStability::Provisional),
     capability("nonlinear-equations", ApiStability::Provisional),
     capability("nonlinear-optimization", ApiStability::Stable),
@@ -56,6 +57,7 @@ pub const CAPABILITIES: &[Capability] = &[
     capability("sparse-linear-algebra", ApiStability::Stable),
     capability("sparse-solver-workspaces", ApiStability::Provisional),
     capability("stochastic-optimization", ApiStability::Provisional),
+    capability("uobyqa", ApiStability::Provisional),
 ];
 
 const fn capability(identifier: &'static str, stability: ApiStability) -> Capability {
@@ -111,6 +113,7 @@ mod tests {
                 "lp-decomposition",
                 "lp-qp-milp",
                 "multiphysics-design",
+                "newuoa",
                 "nonlinear-decomposition",
                 "nonlinear-equations",
                 "nonlinear-optimization",
@@ -118,6 +121,7 @@ mod tests {
                 "sparse-linear-algebra",
                 "sparse-solver-workspaces",
                 "stochastic-optimization",
+                "uobyqa",
             ]
         );
     }

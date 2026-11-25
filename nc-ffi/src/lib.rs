@@ -73,6 +73,8 @@ mod cobyla;
 pub use cobyla::*;
 mod lincoa;
 pub use lincoa::*;
+mod powell_unconstrained;
+pub use powell_unconstrained::*;
 mod stochastic;
 pub use stochastic::*;
 mod nonlinear_decomposition;
@@ -1148,12 +1150,9 @@ mod tests {
         assert_eq!(manifest.rust_package_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(manifest.schema_version, 1);
         assert_eq!(manifest.compatibility_epoch, 1);
-        assert_eq!(manifest.capabilities.len(), nc_core::CAPABILITIES.len());
-        assert_eq!(manifest.capabilities[0].identifier, "benders-decomposition");
-        assert_eq!(
-            manifest.capabilities.last().unwrap().identifier,
-            "stochastic-optimization"
-        );
+        assert!(manifest.capabilities.iter().map(|entry| entry.identifier.as_str()).eq(
+            nc_core::CAPABILITIES.iter().map(|entry| entry.identifier)
+        ));
     }
 
     #[test]

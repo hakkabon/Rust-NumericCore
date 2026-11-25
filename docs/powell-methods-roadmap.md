@@ -91,12 +91,26 @@ within `1e-6`. LINCOA used 29 calls and COBYLA used 13 on that fixture.
 
 ## 3. NEWUOA and UOBYQA
 
-Reuse validated interpolation components for NEWUOA's unconstrained
-least-change quadratic models. Add UOBYQA as a full-quadratic reference
-for small problems. Compare the methods under equal evaluation budgets
-on coupled quadratics and nonquadratic functions.
+`minimize_newuoa` and `NewuoaSolver` run Basin 3.6.0's NEWUOA with
+`2n + 1` interpolation points and least-Frobenius-norm Hessian updates.
+
+`minimize_uobyqa` and `UobyqaSolver` run NumericCore's dense UOBYQA reference
+variant on up to 16 variables. It uses `(n + 1)(n + 2)/2` points to determine
+a full quadratic and selects replacement points using quadratic Lagrange
+polynomials. It refactors the scaled interpolation system directly and
+uses dense eigensolves for the objective and geometry subproblems. Its
+radius and geometry rules are specific to NumericCore.
+
+Both methods count the initial interpolation samples against the callback
+budget. They return the best evaluated point and distinguish radius
+resolution, iteration limits, evaluation limits, and numerical failure.
+On the contract fixtures, both methods reached objective values below
+`1e-10` with a 500-call budget. NEWUOA and UOBYQA used 62 and 86 calls
+on the three-variable coupled quadratic, and 149 and 122 on the
+two-variable Rosenbrock problem.
 
 [Powell's NEWUOA report](https://optimization-online.org/2005/01/1045/) ·
+[Basin NEWUOA](https://docs.rs/basin/3.6.0/basin/struct.Newuoa.html) ·
 [Powell's UOBYQA paper](https://doi.org/10.1007/s101070100290)
 
 ## 4. Powell hybrid method

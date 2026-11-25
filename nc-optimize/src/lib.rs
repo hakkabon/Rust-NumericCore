@@ -30,6 +30,11 @@ pub mod cobyla;
 pub use cobyla::{minimize_cobyla, CobylaOptions, CobylaResult, CobylaTermination};
 pub mod lincoa;
 pub use lincoa::{minimize_lincoa, LincoaOptions, LincoaResult, LincoaTermination};
+pub mod powell_unconstrained;
+pub use powell_unconstrained::{
+    minimize_newuoa, minimize_uobyqa, PowellUnconstrainedOptions, PowellUnconstrainedResult,
+    PowellUnconstrainedTermination,
+};
 pub mod distributed_benders;
 mod benders_tree;
 pub mod integer_benders;
