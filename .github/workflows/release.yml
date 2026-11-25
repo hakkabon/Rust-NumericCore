@@ -76,6 +76,7 @@ jobs:
           grep -q 'func integrateEngineeringTrajectory' "${BINDINGS}"
           grep -q 'func startDistributedBenders' "${BINDINGS}"
           grep -q 'func verifyDistributedBenders' "${BINDINGS}"
+          grep -q 'func solveBobyqa' "${BINDINGS}"
 
       - name: Compute checksum
         id: checksum

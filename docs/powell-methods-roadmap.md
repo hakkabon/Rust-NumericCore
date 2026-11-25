@@ -11,15 +11,35 @@ curvature in an independent direction.
 
 ## 1. BOBYQA
 
-Add a bounded quadratic interpolation solver with a maintained set of
-sample points, minimum-Frobenius-change Hessian updates, geometry steps,
-and recovery after loss of interpolation accuracy. Validate feasibility of
-all sampled points, exact accounting of evaluations, and termination
-reports. Compare against Powell's reference implementation on rotated
-quadratics, fixed variables, active bounds, and engineering calibrations
-with a fixed objective-evaluation budget.
+NumericCore exposes BOBYQA through `minimize_bobyqa` in Rust and
+`BobyqaSolver` in Swift. Both use version 0.3.2 of the pure-Rust PRIMA port.
+The port maintains a quadratic interpolation set with minimum-Frobenius
+Hessian-change updates, geometry steps, and RESCUE for loss of model
+accuracy. Its default configuration follows PRIMA's trajectory.
 
-[Powell's BOBYQA report](https://optimization-online.org/wp-content/uploads/2010/05/2616.pdf)
+NumericCore removes fixed coordinates before interpolation, projects the
+start into the box, and caps the initial radius at half the narrowest
+nonfixed interval. The evaluation count measures calls to the objective,
+including model initialization. The caller's budget applies even before
+enough points have been sampled to construct the first quadratic. The
+objective must be finite with magnitude below `1e30`.
+
+`RadiusReached` reports trust-region resolution. `EvaluationLimit` and
+`ModelDegenerate` return the best evaluated point with their respective
+stop reasons. An all-fixed box is evaluated once. The manifest lists BOBYQA
+as provisional, with a synchronous value callback on the UniFFI path.
+
+The contract suite checks a rotated quadratic with an active bound, a
+one-dimensional fit after fixed-coordinate elimination, and a synthetic
+exponential-response calibration. Under a shared budget of 160 calls on the
+calibration, BOBYQA reached a residual sum of squares of `1.69e-13` in
+74 calls. The diagonal-model solver reached `2.77e-2` in 155 calls on
+the same fixture.
+
+[Powell's BOBYQA report](https://optimization-online.org/wp-content/uploads/2010/05/2616.pdf) ·
+[PRIMA](https://github.com/libprima/prima) ·
+[Pinned Rust port](https://crates.io/crates/bobyqa/0.3.2) ·
+[Third-party notice](../third-party/bobyqa/PRIMA-NOTICE)
 
 ## 2. COBYLA and LINCOA
 

@@ -85,6 +85,9 @@ xcodebuild -create-xcframework \
     -library "${OUT_DIR}/ios-sim/${LIB_NAME}.a" -headers "${HEADERS_DIR}" \
     -output "${OUT_DIR}/NumericCoreFFI.xcframework"
 
+cp third-party/bobyqa/LICENSE-MIT "${OUT_DIR}/NumericCoreFFI.xcframework/BOBYQA-LICENSE.txt"
+cp third-party/bobyqa/PRIMA-NOTICE "${OUT_DIR}/NumericCoreFFI.xcframework/BOBYQA-PRIMA-NOTICE.txt"
+
 echo "==> Zipping for release upload"
 (cd "${OUT_DIR}" && zip -r NumericCoreFFI.xcframework.zip NumericCoreFFI.xcframework)
 

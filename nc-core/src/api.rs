@@ -34,6 +34,7 @@ pub const API_COMPATIBILITY_EPOCH: u32 = 1;
 /// Swift-NumericCore's `NumericCoreAPI.capabilities`.
 pub const CAPABILITIES: &[Capability] = &[
     capability("benders-decomposition", ApiStability::Provisional),
+    capability("bobyqa", ApiStability::Provisional),
     capability("dae-integration", ApiStability::Provisional),
     capability("dense-linear-algebra", ApiStability::Stable),
     capability("distributed-benders", ApiStability::Provisional),
@@ -93,6 +94,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "benders-decomposition",
+                "bobyqa",
                 "dae-integration",
                 "dense-linear-algebra",
                 "distributed-benders",

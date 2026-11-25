@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Optimization solvers (LP simplex/interior-point, later MILP/NLP) consumed via the ASL-style SolverInterface. Backs the AMPL-style modeling layer (NumericCoreAMPL)."
 
 [dependencies]
+bobyqa = "=0.3.2"
 nc-core.workspace = true
 nc-sparse.workspace = true
 nc-decomp.workspace = true
