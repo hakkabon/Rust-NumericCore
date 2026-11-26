@@ -28,16 +28,10 @@
 //! found.
 //!
 //! ## Scope, deliberately
-//! - **Dense**, not sparse-with-factorization-updates. `Binv` (the
-//!   explicit basis inverse) is a full `m x m` matrix, updated via
-//!   standard Gauss-Jordan pivoting and rebuilt from the current basis
-//!   every 64 pivots to limit accumulated roundoff. Reduced costs
-//!   are recomputed from scratch every iteration rather than maintained
-//!   incrementally with an eta-file/product-form-of-inverse scheme. This
-//!   matches the "simplex does well for smallish problems" framing this
-//!   solver was scoped under — the sparse/incremental-factorization
-//!   version is real future work if a large-problem need shows up, not
-//!   a design mistake to fix reflexively.
+//! - `Binv` (the explicit basis inverse) is a full `m x m` matrix.
+//!   Pivots update it in place. Appended slack rows extend it using the
+//!   new rows' sparse coefficients. Periodic refactors can eliminate
+//!   basic slack columns and factor the smaller structural block.
 //! - **Dantzig's rule** (largest-reduced-cost-magnitude) for entering
 //!   variable selection, first-blocking-row for leaving. Repeated basis
 //!   states switch the run to Bland's rule; the iteration cap remains the
@@ -49,7 +43,12 @@
 
 use crate::lp_decomposition::{LpBasis, LpBasisStatus};
 use crate::{Bound, OptimizeError, Problem, SolveStatus, Solution, Solver};
+use nc_sparse::{CooMatrix, SparseLuFactorization, SparseNumericOptions, SparseOrdering};
 use std::collections::HashSet;
+
+// Keep the dense path for small bases, where assembling and auditing a
+// sparse factor can cost more than direct elimination.
+pub(crate) const MIN_STRUCTURED_BASIS_ROWS: usize = 64;
 
 /// Bounded-variable revised simplex. See this module's docs for the
 /// formulation and scope.
@@ -169,6 +168,7 @@ pub(crate) struct Workspace {
     x: Vec<f64>,
     iterations: usize,
     pivots: usize,
+    pivots_since_refactor: usize,
 }
 
 impl Workspace {
@@ -242,7 +242,7 @@ impl Workspace {
             return Err(OptimizeError::InvalidProblem("non-finite simplex assembly".into()));
         }
         Ok(Self { m, n_total, matrix, lo, hi, real_cost, basis, is_basic, nb_status, binv, x,
-                  iterations: 0, pivots: 0 })
+                  iterations: 0, pivots: 0, pivots_since_refactor: 0 })
     }
 
     pub(crate) fn basis(&self, n: usize) -> LpBasis {
@@ -263,6 +263,59 @@ impl Workspace {
     }
 
     pub(crate) fn install_basis(&mut self, basis: &LpBasis) -> Result<(), OptimizeError> {
+        self.set_basis(basis)?;
+        self.refactor_basis()?;
+        self.reset_point()
+    }
+
+    /// Extend an unchanged column set by rows whose new slacks are basic.
+    /// If the retained inverse is unusable, rebuild before dropping the basis.
+    pub(crate) fn install_appended_rows(
+        &mut self,
+        previous: &Self,
+        problem: &Problem,
+    ) -> Result<(), OptimizeError> {
+        let n = self.n_total - self.m;
+        let mut basis = previous.basis(n);
+        basis.rows.resize(self.m, LpBasisStatus::Basic);
+        self.set_basis(&basis)?;
+        if self.extend_inverse(previous, problem) && self.reset_point().is_ok() {
+            return Ok(());
+        }
+        self.refactor_basis()?;
+        self.reset_point()
+    }
+
+    fn extend_inverse(&mut self, previous: &Self, problem: &Problem) -> bool {
+        let old_rows = previous.m;
+        let n = self.n_total - self.m;
+        let mut old_slot = vec![None; previous.n_total];
+        for (slot, &column) in previous.basis.iter().enumerate() {
+            old_slot[column] = Some(slot);
+        }
+        for (slot, &column) in self.basis[..old_rows].iter().enumerate() {
+            self.binv[slot].fill(0.0);
+            self.binv[slot][..old_rows].copy_from_slice(&previous.binv[old_slot[column].unwrap()]);
+        }
+        // The bordered basis has blocks [B 0; R -I]. Its lower-left
+        // inverse block is R B⁻¹, and its old multipliers stay in row order.
+        for row in old_rows..self.m {
+            self.binv[row].fill(0.0);
+            self.binv[row][row] = -1.0;
+            debug_assert_eq!(self.basis[row], n + row);
+        }
+        for (row, column, value) in problem.constraints.iter_entries().filter(|&(r, _, _)| r >= old_rows) {
+            if let Some(slot) = old_slot[column] {
+                for (dest, &entry) in self.binv[row].iter_mut().zip(&previous.binv[slot]) {
+                    *dest += value * entry;
+                }
+            }
+        }
+        self.pivots_since_refactor = previous.pivots_since_refactor;
+        self.binv.iter().flatten().all(|v| v.is_finite())
+    }
+
+    fn set_basis(&mut self, basis: &LpBasis) -> Result<(), OptimizeError> {
         if basis.rows.len() != self.m || basis.variables.len() != self.n_total - self.m {
             return Err(OptimizeError::InvalidProblem("LP basis dimensions do not match".into()));
         }
@@ -279,8 +332,7 @@ impl Workspace {
         if self.basis.len() != self.m {
             return Err(OptimizeError::InvalidProblem("LP basis has the wrong number of basic entries".into()));
         }
-        self.refactor_basis()?;
-        self.reset_point()
+        Ok(())
     }
 
     /// Retain the matrix and inverse across numerical edits.
@@ -404,7 +456,9 @@ impl Workspace {
     ) -> Result<PhaseOutcome, OptimizeError> {
         let mut seen_states = HashSet::new();
         let mut bland_mode = false;
-        let mut pivots_since_refactorization = 0usize;
+        if self.m < MIN_STRUCTURED_BASIS_ROWS {
+            self.pivots_since_refactor = 0;
+        }
         for _ in 0..max_iterations {
             self.iterations = self.iterations.saturating_add(1);
             let state: Vec<(usize, u8)> = self.basis.iter().copied().map(|basic| {
@@ -550,10 +604,9 @@ impl Workspace {
                 self.basis[r] = q;
                 self.pivot(&alpha, r);
                 self.pivots = self.pivots.saturating_add(1);
-                pivots_since_refactorization += 1;
-                if pivots_since_refactorization == 64 {
+                self.pivots_since_refactor += 1;
+                if self.pivots_since_refactor >= 64 {
                     self.refactor_basis()?;
-                    pivots_since_refactorization = 0;
                 }
             }
         }
@@ -563,6 +616,86 @@ impl Workspace {
     /// Rebuild the explicit inverse periodically so rank-one pivot-update
     /// roundoff cannot accumulate without bound on long or degenerate runs.
     fn refactor_basis(&mut self) -> Result<(), OptimizeError> {
+        let reduced = if self.m >= MIN_STRUCTURED_BASIS_ROWS {
+            self.slack_reduced_inverse()
+        } else {
+            None
+        };
+        if let Some(inverse) = reduced {
+            self.binv = inverse;
+        } else {
+            self.refactor_dense_basis()?;
+        }
+        self.pivots_since_refactor = 0;
+        Ok(())
+    }
+
+    /// Eliminate basic slack columns (-e_i). The remaining factor uses
+    /// only rows without a basic slack and the basic structural columns.
+    fn slack_reduced_inverse(&self) -> Option<Vec<Vec<f64>>> {
+        let n = self.n_total - self.m;
+        let structural: Vec<_> = self.basis.iter().copied().enumerate()
+            .filter(|&(_, column)| column < n)
+            .collect();
+        let k = structural.len();
+        if k > self.m / 2 {
+            return None;
+        }
+        let active: Vec<_> = (0..self.m).filter(|&row| !self.is_basic[n + row]).collect();
+        debug_assert_eq!(active.len(), k);
+        let mut inverse = vec![vec![0.0; self.m]; self.m];
+        if k > 0 {
+            let mut core = CooMatrix::new(k, k);
+            for (i, &row) in active.iter().enumerate() {
+                for (j, &(_, column)) in structural.iter().enumerate() {
+                    let value = self.matrix[row][column];
+                    if value != 0.0 {
+                        core.push(i, j, value).ok()?;
+                    }
+                }
+            }
+            let core = core.to_csr().ok()?;
+            let options = SparseNumericOptions {
+                pivot_tolerance: 1e-14,
+                drop_tolerance: 0.0,
+                ..Default::default()
+            };
+            let factor = SparseLuFactorization::factor(&core, SparseOrdering::Natural, options).ok()?;
+            let mut rhs = vec![0.0; k];
+            for (i, &row) in active.iter().enumerate() {
+                rhs[i] = 1.0;
+                let solution = factor.solve(&rhs).ok()?;
+                rhs[i] = 0.0;
+                let residual = core.spmv(&solution).ok()?;
+                if residual.iter().enumerate().any(|(j, &value)| {
+                    !value.is_finite() || (value - f64::from(i == j)).abs() > 1e-10
+                }) {
+                    return None;
+                }
+                for (&(slot, _), value) in structural.iter().zip(solution) {
+                    inverse[slot][row] = value;
+                }
+            }
+        }
+        // Recover the basic slack components from s = Ax on the
+        // eliminated rows. Only active rows carry structural responses.
+        for (slot, &column) in self.basis.iter().enumerate().filter(|&(_, &c)| c >= n) {
+            let row = column - n;
+            inverse[slot][row] = -1.0;
+            for &(source, structural_column) in &structural {
+                let coefficient = self.matrix[row][structural_column];
+                if coefficient != 0.0 {
+                    for &r in &active {
+                        let contribution = coefficient * inverse[source][r];
+                        inverse[slot][r] += contribution;
+                    }
+                }
+            }
+        }
+        inverse.iter().flatten().all(|v| v.is_finite()).then_some(inverse)
+    }
+
+    fn refactor_dense_basis(&mut self) -> Result<(), OptimizeError> {
         let mut augmented = vec![vec![0.0; 2 * self.m]; self.m];
         for row in 0..self.m {
             for column in 0..self.m {
@@ -698,6 +831,74 @@ mod tests {
         workspace.binv = vec![vec![7.0, 8.0], vec![9.0, 10.0]];
         workspace.refactor_basis().unwrap();
         assert_eq!(workspace.binv, vec![vec![-1.0, 0.0], vec![0.0, -1.0]]);
+    }
+
+    #[test]
+    fn sparse_refactor_recovers_the_inverse_in_the_original_basis_order() {
+        let problem = dense_problem(
+            vec![1.0, 1.0],
+            vec![vec![1.0, 5.0], vec![2.0, -1.0], vec![-3.0, 0.0],
+                 vec![1.0, 3.0], vec![0.0, 2.0], vec![1.0, 0.0]],
+            vec![Bound::free(); 6],
+            vec![Bound::free(); 2],
+        );
+        let mut workspace = Workspace::new(&problem).unwrap();
+        workspace.set_basis(&LpBasis {
+            variables: vec![LpBasisStatus::Basic; 2],
+            rows: vec![LpBasisStatus::Basic, LpBasisStatus::Free, LpBasisStatus::Basic,
+                       LpBasisStatus::Free, LpBasisStatus::Basic, LpBasisStatus::Basic],
+        }).unwrap();
+        workspace.basis.swap(0, 4);
+        let sparse = workspace.slack_reduced_inverse().unwrap();
+        workspace.refactor_dense_basis().unwrap();
+        assert_inverse_matches(&sparse, &workspace.binv);
+    }
+
+    #[test]
+    fn appending_slacks_reuses_a_permuted_inverse_and_rebuilds_if_it_is_unusable() {
+        let mut problem = dense_problem(
+            vec![1.0, 1.0],
+            vec![vec![2.0, -1.0], vec![1.0, 3.0]],
+            vec![Bound::fixed(2.0), Bound::free()],
+            vec![Bound::free(), Bound::fixed(1.0)],
+        );
+        let mut previous = Workspace::new(&problem).unwrap();
+        let basis = LpBasis {
+            variables: vec![LpBasisStatus::Basic, LpBasisStatus::AtLower],
+            rows: vec![LpBasisStatus::AtLower, LpBasisStatus::Basic],
+        };
+        previous.install_basis(&basis).unwrap();
+        previous.basis.swap(0, 1);
+        previous.binv.swap(0, 1);
+        previous.pivots_since_refactor = 37;
+
+        problem = dense_problem(
+            vec![2.0, 1.0],
+            vec![vec![2.0, -1.0], vec![1.0, 3.0], vec![3.0, 0.0], vec![-2.0, 4.0]],
+            vec![Bound::fixed(3.0), Bound::free(), Bound::free(), Bound::free()],
+            vec![Bound::free(), Bound::fixed(2.0)],
+        );
+        let mut extended = Workspace::new(&problem).unwrap();
+        extended.install_appended_rows(&previous, &problem).unwrap();
+        let mut rebuilt = Workspace::new(&problem).unwrap();
+        let mut extended_status = basis;
+        extended_status.rows.resize(4, LpBasisStatus::Basic);
+        rebuilt.install_basis(&extended_status).unwrap();
+        assert_inverse_matches(&extended.binv, &rebuilt.binv);
+        assert_eq!(extended.x, rebuilt.x);
+        assert_eq!(extended.pivots_since_refactor, 37);
+
+        previous.binv[0][0] = f64::NAN;
+        extended.install_appended_rows(&previous, &problem).unwrap();
+        assert_eq!(extended.pivots_since_refactor, 0);
+        assert_inverse_matches(&extended.binv, &rebuilt.binv);
+        assert_eq!(extended.x, rebuilt.x);
+    }
+
+    fn assert_inverse_matches(actual: &[Vec<f64>], expected: &[Vec<f64>]) {
+        for (actual, expected) in actual.iter().flatten().zip(expected.iter().flatten()) {
+            assert!((actual - expected).abs() <= 1e-12, "{actual} != {expected}");
+        }
     }
 
     #[test]

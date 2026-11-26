@@ -972,6 +972,35 @@ mod tests {
     }
 
     #[test]
+    fn retries_a_row_extended_master_cold_when_warm_evidence_is_unavailable() {
+        let mut workspace = LpWorkspace::new(epigraph_master(Bound::fixed(0.0)), None).unwrap();
+        let solver = RevisedSimplexSolver::default();
+        assert!(workspace.solve(&solver, 1e-8).unwrap().dual.is_some());
+        let mut append_rows = vec![crate::LpRow {
+            entries: vec![],
+            bound: Bound { lower: None, upper: Some(0.0) },
+        }; crate::simplex::MIN_STRUCTURED_BASIS_ROWS];
+        append_rows.push(crate::LpRow {
+            entries: vec![(1, -1.0)],
+            bound: Bound { lower: None, upper: Some(-4.0) },
+        });
+        workspace.update(LpUpdate { append_rows, ..Default::default() }).unwrap();
+
+        let attempts = std::cell::RefCell::new(Vec::new());
+        let report = solve_lp_with_retry(&mut workspace, |workspace| {
+            let mut report = workspace.solve(&solver, 1e-8)?;
+            attempts.borrow_mut().push(report.used_warm_start);
+            if report.used_warm_start {
+                report.dual = None;
+            }
+            Ok(report)
+        }).unwrap();
+        assert_eq!(*attempts.borrow(), [true, false]);
+        let bound = report.dual.unwrap().objective_bound;
+        assert!((bound - 0.875).abs() < 1e-12, "{bound}");
+    }
+
+    #[test]
     fn epigraph_repair_cannot_turn_a_weak_witness_into_optimal_evidence() {
         let master = epigraph_master(Bound::fixed(0.0));
         let raw = [0.0, -0.125 - 1e-13, 0.0, 0.0];

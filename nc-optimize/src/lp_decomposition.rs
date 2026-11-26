@@ -1,7 +1,8 @@
 //! Continuous LP reoptimization and original-coordinate numerical evidence.
 
 use crate::{
-    simplex::Workspace, Bound, OptimizeError, Problem, RevisedSimplexSolver, Solution, SolveStatus,
+    simplex::{Workspace, MIN_STRUCTURED_BASIS_ROWS},
+    Bound, OptimizeError, Problem, RevisedSimplexSolver, Solution, SolveStatus,
 };
 use nc_sparse::CooMatrix;
 
@@ -189,11 +190,16 @@ impl LpWorkspace {
         };
         problem.validate()?;
         if let Some(previous) = &self.workspace {
-            let mut basis = previous.basis(n);
-            basis.rows.resize(rows, LpBasisStatus::Basic);
-            basis.variables.resize(columns, LpBasisStatus::Free);
             let mut workspace = Workspace::new(&problem)?;
-            self.workspace = workspace.install_basis(&basis).is_ok().then_some(workspace);
+            let installed = if columns == n && rows >= MIN_STRUCTURED_BASIS_ROWS {
+                workspace.install_appended_rows(previous, &problem)
+            } else {
+                let mut basis = previous.basis(n);
+                basis.rows.resize(rows, LpBasisStatus::Basic);
+                basis.variables.resize(columns, LpBasisStatus::Free);
+                workspace.install_basis(&basis)
+            };
+            self.workspace = installed.is_ok().then_some(workspace);
         }
         self.problem = problem;
         Ok(())

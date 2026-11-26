@@ -54,8 +54,14 @@ result and its iteration history. Convergence is numerical and uses the
 requested absolute or relative gap. Infeasibility requires a verified
 Farkas certificate on the master or auxiliary relaxation. A master
 relaxation can report unboundedness without proving the original model
-unbounded. The continuous implementation uses the current dense-basis
-simplex backend.
+unbounded. The simplex backend retains an explicit dense basis inverse.
+When a larger master appends only rows, the new slack columns border that
+inverse. Sparse entries of the appended rows form the new block, so the
+previous block can be reused. Periodic refactors eliminate basic slack
+columns and use a sparse LU of the remaining structural block when it is
+at most half the dimension. The dense refactor remains available for
+small, less structured, or numerically unsuitable bases. Missing warm
+evidence still triggers a cold solve.
 
 ## Capacity-planning regression
 
@@ -67,3 +73,20 @@ the gap. Independent proof replay verified the 16-scenario distributed
 result after nine rounds and 144 recourse checks. The regression tests
 exercise multiplier repair and reject repaired candidates with missing
 support or an excessive gap.
+
+The following native Rust measurements compare the bound-recovery baseline
+with basis reuse at the same `1e-5` gap target. Each value is the median of
+three release-mode processes after one warm-up, on Intel macOS with one
+scenario thread. The objectives and verified bounds agreed within rounding.
+
+| Multi-cut scenarios | Solve time before | Solve time after | Peak RSS before | Peak RSS after |
+| ---: | ---: | ---: | ---: | ---: |
+| 16 | 0.041 s | 0.024 s | 4.02 MiB | 3.57 MiB |
+| 64 | 0.789 s | 0.337 s | 18.21 MiB | 12.90 MiB |
+| 128 | 12.77 s | 3.22 s | 58.81 MiB | 40.83 MiB |
+
+A separate interleaved 128-scenario comparison measured single-cut at
+0.200 s before and 0.201 s after. With the optimized multi-cut solver,
+one and four scenario threads took 3.46 s and 3.27 s respectively.
+A trust-region radius of five with one thread took 8.54 s and generated
+817 cuts versus 713 in the unrestricted run. All met the same gap target.
