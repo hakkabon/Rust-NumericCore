@@ -32,6 +32,16 @@ blocks are feasible. Feasibility cuts always retain their scenario identity.
 
 The master and recourse LPs retain simplex workspaces. Parallel recourse
 evaluation uses separate workspaces and gathers results in input order.
+When the dual of an optimal master solve fails verification, the master
+can repair its recourse optimality cut multipliers. It zeros positive
+multipliers on these upper-only rows. Each epigraph has a budget equal to
+its objective coefficient. The repair reduces the cut weights that
+oversubscribe a budget and leaves first-stage and feasibility row
+multipliers alone. The original LP verifier recomputes
+row and variable support, primal feasibility, and the primal-dual gap
+before accepting the lower bound. Distributed Benders exports the resulting
+multipliers for replay by the same verifier.
+
 An uncertified warm solve is retried cold unless it hit its LP iteration
 limit. Optional trust-region trials restrict first-stage bounds while the
 unrestricted master supplies the lower bound. Active cuts are retained when
@@ -46,3 +56,14 @@ Farkas certificate on the master or auxiliary relaxation. A master
 relaxation can report unboundedness without proving the original model
 unbounded. The continuous implementation uses the current dense-basis
 simplex backend.
+
+## Capacity-planning regression
+
+On the eight-depot capacity-planning study, single-cut and multi-cut both
+closed the `1e-5` relative gap at 16, 64, and 128 scenarios. The 64-scenario
+multi-cut run stopped at `7.12e-6`, with lower and upper bounds of
+4389.125 and 4389.15625. A separate 256-scenario single-cut run also closed
+the gap. Independent proof replay verified the 16-scenario distributed
+result after nine rounds and 144 recourse checks. The regression tests
+exercise multiplier repair and reject repaired candidates with missing
+support or an excessive gap.

@@ -204,6 +204,17 @@ impl LpWorkspace {
         solver: &RevisedSimplexSolver,
         evidence_tolerance: f64,
     ) -> Result<LpSolveReport, OptimizeError> {
+        self.solve_with_dual_repair(solver, evidence_tolerance, |_, _| None)
+    }
+
+    /// A caller can propose multipliers for a structured LP. Every proposal
+    /// must pass the same original-model audit before it becomes evidence.
+    pub(crate) fn solve_with_dual_repair(
+        &mut self,
+        solver: &RevisedSimplexSolver,
+        evidence_tolerance: f64,
+        repair: impl FnOnce(&Problem, &[f64]) -> Option<Vec<f64>>,
+    ) -> Result<LpSolveReport, OptimizeError> {
         solver.validate()?;
         if !valid_tolerance(evidence_tolerance) {
             return Err(OptimizeError::InvalidConfiguration(
@@ -243,21 +254,17 @@ impl LpWorkspace {
                 let multipliers = workspace.row_multipliers(None);
                 let residual = workspace.maximum_basic_reduced_cost(&multipliers);
                 report.maximum_basic_reduced_cost = residual.is_finite().then_some(residual);
-                report.dual = verify_lp_dual(
-                    &self.problem,
-                    &report.solution.variable_values,
-                    &multipliers,
-                    evidence_tolerance,
-                )
-                .or_else(|| {
-                    let adjusted = adjust_upper_support(&self.problem, &multipliers)?;
+                let verify = |candidate: &[f64]| {
                     verify_lp_dual(
                         &self.problem,
                         &report.solution.variable_values,
-                        &adjusted,
+                        candidate,
                         evidence_tolerance,
                     )
-                });
+                };
+                report.dual = verify(&multipliers)
+                    .or_else(|| verify(&repair(&self.problem, &multipliers)?))
+                    .or_else(|| verify(&adjust_upper_support(&self.problem, &multipliers)?));
             }
             SolveStatus::Infeasible => {
                 report.infeasibility = verify_lp_farkas(

@@ -1,7 +1,7 @@
 //! Transport-neutral continuous Benders with independently replayable numerical evidence.
 
 use crate::{
-    benders::{affine, box_minimum, make_master, solve_lp, validate, violation},
+    benders::{affine, box_minimum, make_master, solve_lp, solve_master_lp, validate, violation},
     verify_lp_dual, verify_lp_farkas, BendersCutStrategy, BendersIncumbent, BendersOptions,
     BendersProblem, BendersRecourseSolution, BendersScenario, Bound, CutInsertion, CutKind,
     DecompositionCut, DecompositionCutPool, LpSolveReport, LpUpdate, LpWorkspace, OptimizeError,
@@ -469,10 +469,12 @@ impl DistributedBendersCoordinator {
             return;
         }
         let options = self.state.options;
-        let Ok(report) = solve_lp(
+        let first_stage_columns = self.state.columns();
+        let Ok(report) = solve_master_lp(
             &mut self.state.master,
             &solver(options.lp_iteration_limit, options.evidence_tolerance),
             options.evidence_tolerance,
+            first_stage_columns,
         ) else {
             self.status = DistributedBendersStatus::MasterUnresolved;
             return;

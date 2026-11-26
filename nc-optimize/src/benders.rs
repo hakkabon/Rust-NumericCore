@@ -213,7 +213,7 @@ pub fn solve_benders(
         .collect::<Result<Vec<_>, _>>()?;
 
     for iteration in 1..=options.max_iterations {
-        let global = solve_lp(&mut master, &solver, options.evidence_tolerance)?;
+        let global = solve_master_lp(&mut master, &solver, options.evidence_tolerance, n)?;
         let Some(dual) = &global.dual else {
             result.termination = match global.solution.status {
                 SolveStatus::Infeasible
@@ -622,7 +622,7 @@ fn trust_trial(
         variable_bounds: restricted,
         ..Default::default()
     })?;
-    let result = solve_lp(master, solver, tolerance);
+    let result = solve_master_lp(master, solver, tolerance, center.len());
     master.update(LpUpdate {
         variable_bounds: original,
         ..Default::default()
@@ -705,7 +705,27 @@ pub(crate) fn solve_lp(
     solver: &RevisedSimplexSolver,
     tolerance: f64,
 ) -> Result<LpSolveReport, OptimizeError> {
-    let report = workspace.solve(solver, tolerance)?;
+    solve_lp_with_retry(workspace, |workspace| workspace.solve(solver, tolerance))
+}
+
+pub(crate) fn solve_master_lp(
+    workspace: &mut LpWorkspace,
+    solver: &RevisedSimplexSolver,
+    tolerance: f64,
+    first_stage_columns: usize,
+) -> Result<LpSolveReport, OptimizeError> {
+    solve_lp_with_retry(workspace, |workspace| {
+        workspace.solve_with_dual_repair(solver, tolerance, |problem, multipliers| {
+            repair_epigraph_support(problem, multipliers, first_stage_columns)
+        })
+    })
+}
+
+fn solve_lp_with_retry(
+    workspace: &mut LpWorkspace,
+    solve: impl Fn(&mut LpWorkspace) -> Result<LpSolveReport, OptimizeError>,
+) -> Result<LpSolveReport, OptimizeError> {
+    let report = solve(workspace)?;
     if report.used_warm_start
         && report.solution.status != SolveStatus::IterationLimit
         && report.dual.is_none()
@@ -713,11 +733,75 @@ pub(crate) fn solve_lp(
         && report.unbounded_ray.is_none()
     {
         let mut cold = LpWorkspace::new(workspace.problem().clone(), report.subproblem)?;
-        let result = cold.solve(solver, tolerance)?;
+        let result = solve(&mut cold)?;
         *workspace = cold;
         return Ok(result);
     }
     Ok(report)
+}
+
+// Every optimality row has one -1 entry in its epigraph column. For that
+// column, the sum of the nonnegative cut weights (-row multipliers) cannot
+// exceed its objective coefficient. Project onto those two sign and budget
+// conditions. The original-model audit decides whether the witness is usable.
+fn repair_epigraph_support(
+    problem: &Problem,
+    multipliers: &[f64],
+    first_stage_columns: usize,
+) -> Option<Vec<f64>> {
+    let costs = problem.objective.get(first_stage_columns..)?;
+    let bounds = problem.var_bounds.get(first_stage_columns..)?;
+    let mut repaired = multipliers.to_vec();
+    let mut changed = false;
+    let mut column_by_row = vec![None; multipliers.len()];
+    let mut activity = vec![0.0; costs.len()];
+    let mut terms = vec![0usize; costs.len()];
+    for (row, column, coefficient) in problem.constraints.iter_entries() {
+        if column < first_stage_columns {
+            continue;
+        }
+        let index = column - first_stage_columns;
+        let y = repaired.get_mut(row)?;
+        if coefficient != -1.0
+            || column_by_row[row].replace(index).is_some()
+            || problem.row_bounds[row].lower.is_some()
+            || problem.row_bounds[row].upper.is_none()
+            || !y.is_finite()
+        {
+            return None;
+        }
+        if *y > 0.0 {
+            // Upper-only cut rows cannot support a positive multiplier.
+            *y = 0.0;
+            changed = true;
+        }
+        activity[index] -= *y;
+        terms[index] += usize::from(*y != 0.0);
+    }
+
+    let mut factors = vec![1.0; costs.len()];
+    for (i, (&cost, &used)) in costs.iter().zip(&activity).enumerate() {
+        if !used.is_finite()
+            || cost <= 0.0
+            || bounds[i].lower.is_none()
+            || bounds[i].upper.is_some()
+        {
+            return None;
+        }
+        if used > cost {
+            // Allow for division, multiplication, and the rounded sum of
+            // nonnegative terms when the verifier recomputes Aᵀy.
+            let margin = (terms[i] as f64 + 2.0) * f64::EPSILON;
+            factors[i] = (cost / used) * (1.0 - margin);
+            changed = true;
+        }
+    }
+    for (y, column) in repaired.iter_mut().zip(column_by_row) {
+        if let Some(index) = column {
+            *y *= factors[index];
+        }
+    }
+    changed.then_some(repaired)
 }
 
 pub(crate) struct Affine {
@@ -820,4 +904,78 @@ pub(crate) fn violation(cut: &DecompositionCut, x: &[f64]) -> Result<f64, Optimi
 
 fn invalid(message: &str) -> OptimizeError {
     OptimizeError::InvalidProblem(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::verify_lp_dual;
+
+    fn epigraph_master(first_stage: Bound) -> Problem {
+        Problem {
+            objective: vec![0.0, 0.125, 0.125],
+            constraints: CsrMatrix::new(
+                4,
+                3,
+                vec![0, 1, 3, 4, 5],
+                vec![0, 0, 1, 1, 2],
+                vec![1.0, 1.0, -1.0, -1.0, -1.0],
+            )
+            .unwrap(),
+            row_bounds: [0.0, -2.0, -2.0, -3.0]
+                .into_iter()
+                .map(|upper| Bound { lower: None, upper: Some(upper) })
+                .collect(),
+            var_bounds: [first_stage]
+                .into_iter()
+                .chain([Bound { lower: Some(0.0), upper: None }; 2])
+                .collect(),
+            is_integer: vec![false; 3],
+        }
+    }
+
+    #[test]
+    fn repairs_only_the_oversubscribed_epigraph_and_reaudits_the_bound() {
+        let mut master = epigraph_master(Bound { lower: Some(0.0), upper: Some(1.0) });
+        let point = [0.0, 2.0, 3.0];
+        let raw = [-0.5, -0.0625 - 1e-13, -0.0625, -0.125];
+        assert!(verify_lp_dual(&master, &point, &raw, 1e-8).is_none());
+        let repaired = repair_epigraph_support(&master, &raw, 1).unwrap();
+        assert_eq!(repaired[0], raw[0]);
+        assert_eq!(repaired[3], raw[3]);
+        assert!(repaired[1] > raw[1]);
+        let dual = verify_lp_dual(&master, &point, &repaired, 1e-8).unwrap();
+        assert!(dual.reduced_costs[1] >= 0.0);
+        assert!(dual.objective_bound <= 0.625);
+        assert!((dual.objective_bound - 0.625).abs() < 1e-12);
+
+        // Clearing the epigraph support does not clear a violation on
+        // an unrelated free first-stage column.
+        master.var_bounds[0] = Bound::free();
+        assert!(verify_lp_dual(&master, &point, &repaired, 1e-8).is_none());
+    }
+
+    #[test]
+    fn clears_wrong_signs_only_on_rows_with_a_master_epigraph() {
+        let master = epigraph_master(Bound::fixed(0.0));
+        let point = [0.0, 2.0, 3.0];
+        let mut raw = [0.0, -0.125 - 1e-13, 2e-15, -0.125];
+        assert!(verify_lp_dual(&master, &point, &raw, 1e-8).is_none());
+        let repaired = repair_epigraph_support(&master, &raw, 1).unwrap();
+        assert_eq!(repaired[2], 0.0);
+        assert!(verify_lp_dual(&master, &point, &repaired, 1e-8).is_some());
+
+        raw[0] = 2e-15;
+        let repaired = repair_epigraph_support(&master, &raw, 1).unwrap();
+        assert_eq!(repaired[0], raw[0]);
+        assert!(verify_lp_dual(&master, &point, &repaired, 1e-8).is_none());
+    }
+
+    #[test]
+    fn epigraph_repair_cannot_turn_a_weak_witness_into_optimal_evidence() {
+        let master = epigraph_master(Bound::fixed(0.0));
+        let raw = [0.0, -0.125 - 1e-13, 0.0, 0.0];
+        let repaired = repair_epigraph_support(&master, &raw, 1).unwrap();
+        assert!(verify_lp_dual(&master, &[0.0, 2.0, 3.0], &repaired, 1e-8).is_none());
+    }
 }
