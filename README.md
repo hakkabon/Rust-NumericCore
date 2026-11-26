@@ -168,6 +168,8 @@ case identifiers, solver-family manifests, deterministic JSON snapshots,
 baseline-regression detection, and uploaded CI evidence. Run
 `cargo run -p nc-optimize --example numerical_validation -- standard` to
 produce the standard-tier artifact locally.
+The [realistic LP and MILP panel](docs/realistic-benchmark-panel.md) runs
+separately on published Netlib, ASU and MIPLIB instances with fixed budgets.
 Phase 52 adds a reusable sparse nonlinear KKT pipeline: exact graph Hessian and
 Jacobian lowering, one-time symbolic ordering, symmetric-indefinite LDLT
 refactorization, iterative refinement, inertia/fill diagnostics, and a standard-

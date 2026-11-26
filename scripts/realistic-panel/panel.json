@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "netlib_decoder": {"url": "https://netlib.org/lp/data/emps.c", "sha256": "fee41f544f6873a5e12bc598947828dc9964ef0676162e4df55e915760e2be22"},
+  "cases": [
+    {"id": "afiro", "url": "https://netlib.org/lp/data/afiro", "compression": "netlib", "source_sha256": "964d9df9579e2d16a025693b64057910ba99f1ec6bafe40ef0098319e40b28ba", "mps_sha256": "fd3562804ff19382a9cd8bcb22ec81bffd24a4143a2290783831d8c64516a24b", "rows": 27, "columns": 32, "nonzeros": 83, "integer_variables": 0, "reference": {"objective": -464.75314286, "absolute_tolerance": 1e-08}},
+    {"id": "boeing2", "url": "https://netlib.org/lp/data/boeing2", "compression": "netlib", "source_sha256": "db1c2233bc17d6fa9a5f8df1faf72ca495f34dc7c42b6f06226576eb9fd03a70", "mps_sha256": "ac6bd9c8cb95e61ab78a8a9f33b8326830ad20a6be944e074387e5805da2a3ef", "rows": 166, "columns": 143, "nonzeros": 1196, "integer_variables": 0, "reference": {"objective": -315.01872802, "absolute_tolerance": 1e-08}},
+    {"id": "ship04l", "url": "https://netlib.org/lp/data/ship04l", "compression": "netlib", "source_sha256": "6ce7159e9a7bca732d37b6198b2f8ad4fea6dad026d428f425222a7b0bf59ba8", "mps_sha256": "a63422b903f5711333363f3278d66731518a1ce1983efb468e062ed0cecdeb4f", "rows": 402, "columns": 2118, "nonzeros": 6332, "integer_variables": 0, "reference": {"objective": 1793324.538, "absolute_tolerance": 5e-05}},
+    {"id": "ship12l", "url": "https://netlib.org/lp/data/ship12l", "compression": "netlib", "source_sha256": "bb6c65988f8fa9ecab7b3c4e5600e9d51a58ddea5ee5928f0cd9a0addaf5af3f", "mps_sha256": "9b48a8f1640f18ee53bf74d13e12de4946868c8f889bec8f9321dec5baa1c4e3", "rows": 1151, "columns": 5427, "nonzeros": 16170, "integer_variables": 0, "reference": {"objective": 1470187.9193, "absolute_tolerance": 5e-05}},
+    {"id": "qap15", "url": "https://plato.asu.edu/ftp/lptestset/qap15.mps.bz2", "compression": "bzip2", "source_sha256": "edc084e9e3d8ccc5dd25f30c6593e6dbb00cba86c5e664c471d1de37ae28b68a", "mps_sha256": "a24d84de54c73d7ea01ebaf07739e6884d57794d4b1184c0e01a6a4495695712", "rows": 6330, "columns": 22275, "nonzeros": 94950, "integer_variables": 0, "reference": null},
+    {"id": "p0033", "url": "https://raw.githubusercontent.com/coin-or-tools/Data-miplib3/master/p0033.gz", "compression": "gzip", "source_sha256": "815a50e5129884f15817deb9642fec1be4784d6ed58c71f72dd545a27b96e072", "mps_sha256": "8ccff819023237c79ef32e238a5da9348725ce9a4425d48888baf3a0b3b42628", "rows": 16, "columns": 33, "nonzeros": 98, "integer_variables": 33, "reference": {"objective": 3089, "absolute_tolerance": 1e-07}},
+    {"id": "markshare_4_0", "url": "https://miplib.zib.de/WebData/instances/markshare_4_0.mps.gz", "compression": "gzip", "source_sha256": "1a1feb04f5637db9f69be53bd6224fcd9fe5b8d750870d9b2002b535d25f4353", "mps_sha256": "a05d1c8c1a1e0646ea31965fd5e05af7a41801db3cb1820b2ab4cd95c7bc32db", "rows": 4, "columns": 34, "nonzeros": 123, "integer_variables": 30, "reference": {"objective": 1, "absolute_tolerance": 1e-07}},
+    {"id": "neos17", "url": "https://miplib.zib.de/WebData/instances/neos17.mps.gz", "compression": "gzip", "source_sha256": "1d50d129c3cbee9e409399314e5a77626811a46c301a2cf2fa2a2e64f65a8ba9", "mps_sha256": "4ea347bc9061a49b4737f2e77b3c15541c031eb8df14881cc9a4bd96a2d65c00", "rows": 486, "columns": 535, "nonzeros": 4931, "integer_variables": 300, "reference": {"objective": 0.1500025774, "absolute_tolerance": 1e-07}},
+    {"id": "air05", "url": "https://miplib.zib.de/WebData/instances/air05.mps.gz", "compression": "gzip", "source_sha256": "8e03d2b90834dc1fe15c908247fdd8baf76e208aa310508caa0734e5245692cc", "mps_sha256": "1dcbb9e423a0235d9d890896756a840d3c0a32a8ec057f2127b807ca5a97f5d7", "rows": 426, "columns": 7195, "nonzeros": 52121, "integer_variables": 7195, "reference": {"objective": 26374, "absolute_tolerance": 1e-07}}
+  ],
+  "runs": [
+    {"id": "afiro/lp", "case": "afiro", "mode": "lp", "wall_seconds": 20},
+    {"id": "boeing2/lp", "case": "boeing2", "mode": "lp", "wall_seconds": 20},
+    {"id": "ship04l/lp", "case": "ship04l", "mode": "lp", "wall_seconds": 20},
+    {"id": "ship12l/lp", "case": "ship12l", "mode": "lp", "wall_seconds": 20},
+    {"id": "qap15/lp", "case": "qap15", "mode": "lp", "wall_seconds": 20},
+    {"id": "afiro/scaled", "case": "afiro", "mode": "scaled", "wall_seconds": 20},
+    {"id": "boeing2/scaled", "case": "boeing2", "mode": "scaled", "wall_seconds": 20},
+    {"id": "ship04l/scaled", "case": "ship04l", "mode": "scaled", "wall_seconds": 20},
+    {"id": "ship12l/scaled", "case": "ship12l", "mode": "scaled", "wall_seconds": 20},
+    {"id": "p0033/milp", "case": "p0033", "mode": "milp", "wall_seconds": 20, "node_limit": 300},
+    {"id": "markshare_4_0/milp", "case": "markshare_4_0", "mode": "milp", "wall_seconds": 20, "node_limit": 300},
+    {"id": "neos17/milp", "case": "neos17", "mode": "milp", "wall_seconds": 20, "node_limit": 300},
+    {"id": "air05/milp", "case": "air05", "mode": "milp", "wall_seconds": 20, "node_limit": 300},
+    {"id": "ship12l/lp-extended", "case": "ship12l", "mode": "lp", "wall_seconds": 90},
+    {"id": "p0033/milp-extended", "case": "p0033", "mode": "milp", "wall_seconds": 20, "node_limit": 10000},
+    {"id": "markshare_4_0/milp-extended", "case": "markshare_4_0", "mode": "milp", "wall_seconds": 20, "node_limit": 10000},
+    {"id": "neos17/milp-root", "case": "neos17", "mode": "milp", "wall_seconds": 20, "node_limit": 1},
+    {"id": "air05/milp-root", "case": "air05", "mode": "milp", "wall_seconds": 20, "node_limit": 1}
+  ]
+}

@@ -1,0 +1,28 @@
+name: Realistic LP and MILP benchmarks
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  panel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the MPS reader
+        run: python -m pip install -r scripts/realistic-panel/requirements.txt
+      - name: Run the fixed panel
+        run: python scripts/realistic-panel/run.py
+      - name: Upload the benchmark report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: realistic-benchmark-results
+          path: target/realistic-panel/results.jsonl
